@@ -1,0 +1,47 @@
+// Pure geo math: web-mercator tiles <-> lon/lat <-> local metres. No DOM, so node can test it.
+
+export const lonToTileX = (lon, z) => ((lon + 180) / 360) * 2 ** z;
+export const latToTileY = (lat, z) => ((1 - Math.asinh(Math.tan((lat * Math.PI) / 180)) / Math.PI) / 2) * 2 ** z;
+export const tileXToLon = (x, z) => (x / 2 ** z) * 360 - 180;
+export const tileYToLat = (y, z) => (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / 2 ** z))) * 180) / Math.PI;
+
+// Local frame: x east, z south (metres), origin at [lon0, lat0].
+// ponytail: equirectangular around the origin, fine within ~20 km; re-origin when walking further
+export function localFrame(lon0, lat0) {
+  const kx = 111320 * Math.cos((lat0 * Math.PI) / 180), kz = 110540;
+  return {
+    toLocal: (lon, lat) => [(lon - lon0) * kx, (lat0 - lat) * kz],
+    toLonLat: (x, z) => [lon0 + x / kx, lat0 - z / kz],
+  };
+}
+
+// Tiles [z, x, y] whose square lies within r metres of a point (by tile centre distance, padded by half a tile).
+export function tilesAround(lon, lat, z, r, frame) {
+  const tx = Math.floor(lonToTileX(lon, z)), ty = Math.floor(latToTileY(lat, z));
+  const [px, pz] = frame.toLocal(lon, lat);
+  const out = [];
+  for (let dx = -4; dx <= 4; dx++)
+    for (let dy = -4; dy <= 4; dy++) {
+      const x = tx + dx, y = ty + dy;
+      const [ax, az] = frame.toLocal(tileXToLon(x, z), tileYToLat(y, z));
+      const [bx, bz] = frame.toLocal(tileXToLon(x + 1, z), tileYToLat(y + 1, z));
+      const cx = Math.max(ax, Math.min(px, bx)), cz = Math.max(az, Math.min(pz, bz)); // nearest point of the tile
+      if (Math.hypot(cx - px, cz - pz) <= r) out.push([z, x, y]);
+    }
+  return out;
+}
+
+// Shoelace area; in tile coords (y down) MVT outer rings come out positive.
+export const ringArea = (r) => r.reduce((a, p, i) => { const q = r[(i + 1) % r.length]; return a + p[0] * q[1] - q[0] * p[1]; }, 0) / 2;
+
+export function pointInRing(px, pz, r) {
+  let hit = false;
+  for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+    const [xi, zi] = r[i], [xj, zj] = r[j];
+    if (zi > pz !== zj > pz && px < ((xj - xi) * (pz - zi)) / (zj - zi) + xi) hit = !hit;
+  }
+  return hit;
+}
+
+// Mapbox terrain-RGB, as smartmaps/gel packs it.
+export const rgbToHeight = (r, g, b) => -10000 + (r * 65536 + g * 256 + b) * 0.1;

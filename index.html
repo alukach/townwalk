@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Town Walk</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #a8d8ff; font: 13px/1.4 system-ui, sans-serif; }
+    #hud { position: fixed; left: 12px; top: 12px; padding: 8px 10px; border-radius: 8px; background: #fffd; color: #222; white-space: pre; }
+    #help { position: fixed; left: 12px; bottom: 12px; padding: 6px 10px; border-radius: 8px; background: #fffd; color: #222; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+        "pmtiles": "https://cdn.jsdelivr.net/npm/pmtiles@3.2.1/+esm",
+        "@mapbox/vector-tile": "https://cdn.jsdelivr.net/npm/@mapbox/vector-tile@2.0.3/+esm",
+        "pbf": "https://cdn.jsdelivr.net/npm/pbf@4.0.1/+esm"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="hud">loading…</div>
+  <div id="help">WASD / arrows to walk · Shift to run · <code>?lat=…&amp;lon=…</code> for another town</div>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

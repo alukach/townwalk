@@ -1,35 +1,40 @@
-# raea-townwalk
+# townwalk
 
-Walk a cartoon version of a real town, built from open data on [source.coop](https://source.coop) and rendered with
-[raea](https://raea.io). Starting with Nelson, BC; the goal is any town on the globe, loaded on the fly.
+Walk a cartoon version of a real town in the browser, streamed from open data on [source.coop](https://source.coop)
+with HTTP range requests: only the tiles near the walker are fetched. Starting with Nelson, BC; any town by
+`?lat=…&lon=…`.
 
-## Run
+**Play:** https://alukach.github.io/raea-townwalk/ · another town: `?lat=51.1784&lon=-115.5708` (Banff)
+
+## Run locally
 
 ```sh
-uv run fetch_town.py nelson -117.300 49.488 -117.280 49.500   # -> media/nelson.json (bbox: W S E N)
-raea play walk.tsx                                            # WASD / arrows to walk
-raea render walk.tsx --at 0,150,299 -o out/frames/            # stills (keyless renders use an autopilot)
-raea render walk.tsx --composition overview --at 0 -o out/overview/   # top-down debug view
+python3 -m http.server 8765   # then open http://localhost:8765/
+node --test                   # geo math tests
 ```
 
-## Data
+No build step: `index.html` loads three.js, pmtiles, vector-tile and pbf from jsDelivr through an import map.
+`?aerial=600` puts the camera 600 m up (debugging).
 
-| Layer | Source | Used from |
+## Data (all range-read from source.coop, nothing pre-downloaded)
+
+| Layer | Source | Tiles |
 |---|---|---|
-| Buildings | Overture Maps (`fused/overture`, release 2026-04-15-0) | step 1 |
-| Elevation | NASADEM RGB tiles, PMTiles (`smartmaps/gel`) | step 2 (planned) |
-| Roads, water, land use | Overture `transportation` / `base` | step 3 (planned) |
+| Buildings (next: roads, water, land use) | Protomaps OSM basemap v4, `protomaps/openstreetmap/v4.pmtiles` | z15 MVT, ~16 KB, kept within 700 m |
+| Elevation | NASADEM terrain-RGB, `smartmaps/gel/gel.pmtiles` | z12 WebP, ~80 KB, kept within 1.5 km |
+
+Why not Overture GeoParquet: the `fused/overture` row groups span ~6° of longitude, so the smallest range read
+for one town is megabytes. Overture can come back if a finer-partitioned copy shows up.
 
 ## Steps
 
-Each step is a commit you can check out and run.
+Each step is a commit you can check out.
 
-- [x] **0. Walker.** A capsule on flat ground, chase camera, WASD. ![](docs/step0.png)
-- [x] **1. Real buildings.** Overture footprints for downtown Nelson, extruded to height (6 m when unknown), as one
-  composed mesh; point-in-polygon collision with wall sliding.
-  ![](docs/step1-overview.png) ![](docs/step1-walk.png)
-- [ ] **2. Terrain.** Nelson sits on a steep slope above the West Arm: a heightfield from NASADEM. Buildings and
-  the walker sit on it.
-- [ ] **3. Streets and water.** Road ribbons by class, Kootenay Lake, parks.
-- [ ] **4. Cartoon look.** Toon shading and outlines, roof shapes, trees, colour by building class.
-- [ ] **5. Any town.** Fetch by place name or the current view, stream tiles in as you walk.
+- [x] **0. Walker** (raea, desktop). Capsule, chase camera, WASD.
+- [x] **1. Real buildings** (raea). Overture footprints, extruded, with collision.
+- [x] **2. Browser + terrain + streaming.** three.js; buildings and elevation streamed by range request around the
+  walker; buildings seated on the slope; walker follows the ground; camera pulls in past walls.
+  ![](docs/step2-aerial.png) ![](docs/step2-hill.png)
+- [ ] **3. Streets and water.** Road ribbons by kind, lake and river polygons, parks (all in the same z15 tiles).
+- [ ] **4. Cartoon look.** Toon shading and outlines, roofs, trees, colour by building kind.
+- [ ] **5. Any town.** Place search, re-origin when far from start, terrain seams, loading by view direction.
