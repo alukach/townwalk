@@ -193,6 +193,7 @@ function paintBuilding(g, o) {
   wall.lerp(rampColor(o.height, new THREE.Color()), Math.min(1, Math.max(0, (o.height - 10) / 60)));
   const roof = o.pitched ? st.roof ?? ROOFS[(o.hash >>> 8) % ROOFS.length] : st.roof ?? FLAT_ROOF;
   const awning = AWNINGS[(o.hash >>> 4) % AWNINGS.length], windows = o.height >= 10 && o.style !== "church";
+  if (o.tower) wall.lerp(GLASS, 0.55); // towers: a glass curtain wall instead of bands (bands shimmer at that size)
   const P = g.attributes.position, n = g.attributes.normal, a = new Float32Array(P.count * 3);
   for (let t = 0; t < P.count; t += 3) {
     const ny = (n.getY(t) + n.getY(t + 1) + n.getY(t + 2)) / 3, cy = (P.getY(t) + P.getY(t + 1) + P.getY(t + 2)) / 3 - o.y0;
@@ -200,7 +201,7 @@ function paintBuilding(g, o) {
     const col = ny > 0.25 ? roof
       : st.awning && r === 0 ? GLASS // shop window
       : st.awning && r === 1 ? awning // awning over it
-      : windows && r >= 1 && r % 2 === 1 ? GLASS : wall;
+      : windows && !o.tower && r >= 1 && r % 2 === 1 ? GLASS : wall;
     for (let k = 0; k < 3; k++) a.set([col.r, col.g, col.b], (t + k) * 3);
   }
   g.setAttribute("color", new THREE.BufferAttribute(a, 3));
@@ -346,6 +347,12 @@ async function loadTile(x, y) {
 
   // buildings
   const geoms = [], foots = [], c = new THREE.Color();
+  // Like OpenMapTiles' hide_3d: a building whose parts are mapped (building:part) is drawn as its parts only; its
+  // outline would otherwise be a full-height block hiding the setbacks. Test a point inside each part.
+  const partPoints = layerFeatures("buildings").filter((f) => f.type === 3 && f.properties.kind === "building_part").map((f) => {
+    const r = f.loadGeometry()[0], p = r.reduce((s, q) => [s[0] + q.x, s[1] + q.y], [0, 0]).map((v) => v / r.length);
+    return fromTile(p[0] * (E / f.extent), p[1] * (E / f.extent));
+  });
   layerFeatures("buildings").forEach((f, i) => {
     if (f.type !== 3) return;
     const height = +f.properties.height || 5 + (i % 4) * 1.5; // ponytail: OSM rarely has height; vary 5-9.5 m so it reads
@@ -359,6 +366,10 @@ async function loadTile(x, y) {
       else polys.at(-1)?.push(pts); // hole of the last outer
     }
     for (const [outer, ...holes] of polys) {
+      if (f.properties.kind === "building" && partPoints.length) {
+        const ob = bounds([outer]);
+        if (partPoints.some(([px, pz]) => within(px, pz, ob) && geo.pointInRing(px, pz, outer))) { foots.push({ ring: outer, ...ob }); continue; }
+      }
       const gs = outer.map(([px, pz]) => groundAt(px, pz)).filter(Number.isFinite);
       if (!gs.length) continue;
       const lo = Math.min(...gs), hi = Math.max(...gs);
@@ -373,14 +384,15 @@ async function loadTile(x, y) {
       const b = bounds([outer]), inside = named.filter((p) => within(p.x, p.z, b) && geo.pointInRing(p.x, p.z, outer));
       const cx = outer.reduce((s, p) => s + p[0], 0) / outer.length, cz = outer.reduce((s, p) => s + p[1], 0) / outer.length;
       const style = buildingStyle(inside.map((p) => p.kind), landuseAt(cx, cz));
-      const depth = top - bottom, steps = Math.max(1, Math.round(depth / 1.6)); // ~1.6 m bands: awnings, windows
+      const tower = height > 40;
+      const depth = top - bottom, steps = tower ? 1 : Math.max(1, Math.round(depth / 1.6)); // ~1.6 m rows: awnings, window bands
       const g = new THREE.ExtrudeGeometry(shape, pitched
         ? { depth, steps, bevelEnabled: true, bevelThickness: roofH, bevelSize: inset, bevelOffset: -inset, bevelSegments: 1 }
         : { depth, steps, bevelEnabled: false });
       // extrude along +z, stand up: (sx, sy, d) -> (sx, d, -sy) = (x, up, z)
       g.rotateX(-Math.PI / 2).translate(0, bottom - base, 0);
       const hash = (i * 2654435761 + x * 31 + y * 17) >>> 0;
-      geoms.push(paintBuilding(g, { height, pitched, hash, style, y0: bottom - base, row: depth / steps }));
+      geoms.push(paintBuilding(g, { height, pitched, hash, style, tower, y0: bottom - base, row: depth / steps }));
       if (STYLES[style].steeple) { // a spire on the roof
         const spire = new THREE.ConeGeometry(Math.min(2.2, Math.sqrt(area) * 0.12), Math.max(7, height * 0.9), 6).toNonIndexed();
         spire.translate(cx, top - base + (pitched ? roofH : 0) + Math.max(7, height * 0.9) / 2 - 0.3, cz);

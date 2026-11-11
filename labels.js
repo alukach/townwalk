@@ -19,14 +19,23 @@ export function setupLabels(camera) {
       const seen = new Set(); // a POI near a tile edge is in both tiles (and OSM often has a node + an area): once each
       const uniq = near.filter(([, p]) => !seen.has(p.name) && seen.add(p.name));
       const W = innerWidth, H = innerHeight;
-      pool.forEach((el, i) => {
-        const [d, p] = uniq[i] ?? [];
-        if (!p) return (el.style.display = "none");
-        v.set(p.x, p.y, p.z).project(camera);
-        if (v.z > 1 || Math.abs(v.x) > 1.1 || Math.abs(v.y) > 1.1) return (el.style.display = "none"); // behind / off screen
+      const placed = []; // screen boxes taken so far, nearest labels first: an overlapping one is skipped
+      let next = 0;
+      pool.forEach((el) => {
+        let d, p, sx, sy;
+        for (; next < uniq.length; next++) {
+          [d, p] = uniq[next];
+          v.set(p.x, p.y, p.z).project(camera);
+          if (v.z > 1 || Math.abs(v.x) > 1.1 || Math.abs(v.y) > 1.1) continue; // behind / off screen
+          sx = ((v.x + 1) / 2) * W; sy = ((1 - v.y) / 2) * H;
+          const w = 9 * p.name.length + 40; // ponytail: estimated width, no layout read per frame
+          if (placed.some((b) => Math.abs(b[0] - sx) < (b[2] + w) / 2 && Math.abs(b[1] - sy) < 26)) continue;
+          placed.push([sx, sy, w]); next++; break;
+        }
+        if (!placed.length || placed.at(-1)[0] !== sx) return (el.style.display = "none");
         if (el._key !== p.key) { el._key = p.key; el.textContent = ""; el.append(p.icon, Object.assign(document.createElement("span"), { textContent: p.name })); }
         el.style.display = "";
-        el.style.transform = `translate(${((v.x + 1) / 2) * W}px, ${((1 - v.y) / 2) * H}px) translate(-50%, -100%) scale(${Math.max(0.75, 1.25 - d / RANGE)})`;
+        el.style.transform = `translate(${sx}px, ${sy}px) translate(-50%, -100%) scale(${Math.max(0.75, 1.25 - d / RANGE)})`;
         el.style.opacity = d > RANGE * 0.8 ? (RANGE - d) / (RANGE * 0.2) : 1;
       });
     },
