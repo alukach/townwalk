@@ -9,7 +9,10 @@ class RangeSource {
   constructor(url) { this.url = url; }
   getKey() { return this.url; }
   async getBytes(offset, length, signal) {
-    const r = await fetch(this.url, { signal, headers: { Range: `bytes=${offset}-${offset + length - 1}` } });
+    // no-store: Chrome's HTTP cache locks per URL, so parallel ranges of one .pmtiles file queue behind each other
+    // ("Stalled" in devtools; 20 parallel reads took ~3-5 s cached vs ~0.4-0.6 s with no-store). Tiles are cached
+    // decoded in getVT instead.
+    const r = await fetch(this.url, { signal, cache: "no-store", headers: { Range: `bytes=${offset}-${offset + length - 1}` } });
     if (!r.ok) throw new Error(`${r.status} ${this.url}`);
     const data = await r.arrayBuffer();
     stats.requests++; stats.bytes += data.byteLength;

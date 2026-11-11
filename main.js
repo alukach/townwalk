@@ -23,17 +23,27 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(SKY);
 scene.fog = new THREE.Fog(SKY, 400, 1400);
 const camera = new THREE.PerspectiveCamera(60, 1, 0.5, 5000);
-scene.add(new THREE.HemisphereLight(0xffffff, 0x6b8f5a, 1.6));
-const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8aa37a, 1.3));
+const sun = new THREE.DirectionalLight(0xffffff, 2.6);
 sun.position.set(300, 600, 200);
 scene.add(sun);
 const resize = () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); };
 addEventListener("resize", resize); resize();
 
-const buildingMat = new THREE.MeshLambertMaterial({ vertexColors: true });
-const bridgeMat = new THREE.MeshLambertMaterial({ vertexColors: true });
-const terrainMat = new THREE.MeshLambertMaterial({ vertexColors: true });
-const player = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, 1.1, 4, 12), new THREE.MeshLambertMaterial({ color: 0xe4572e }));
+// cartoon look: three flat light bands (toon shading) and dark ink lines on building edges
+const bands = new THREE.DataTexture(new Uint8Array([110, 185, 255]), 3, 1, THREE.RedFormat);
+bands.minFilter = bands.magFilter = THREE.NearestFilter; bands.needsUpdate = true;
+const toon = (o = {}) => new THREE.MeshToonMaterial({ gradientMap: bands, ...o });
+const buildingMat = toon({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }); // faces back a hair so ink lines win
+const inkMat = new THREE.LineBasicMaterial({ color: 0x2d2a32 });
+const bridgeMat = toon({ vertexColors: true });
+const terrainMat = toon({ vertexColors: true });
+const treeMat = toon({ vertexColors: true });
+const playerGeo = new THREE.CapsuleGeometry(0.35, 1.1, 4, 12);
+const player = new THREE.Mesh(playerGeo, toon({ color: 0xe4572e }));
+const hull = new THREE.Mesh(playerGeo, new THREE.MeshBasicMaterial({ color: 0x2d2a32, side: THREE.BackSide })); // ink outline
+hull.scale.setScalar(1.12);
+player.add(hull);
 scene.add(player);
 
 // ---- terrain: z12 elevation tiles as height grids + meshes ------------------------------------------------------
@@ -111,6 +121,20 @@ function rampColor(h, out) {
   const [s0, c0] = RAMP[i - 1], [s1, c1] = RAMP[i];
   return out.copy(c0).lerp(c1, (h - s0) / (s1 - s0));
 }
+// Cartoon buildings: pastel walls that drift into MapLibre's height ramp as buildings get taller; faces that look up
+// are roof, in a roof colour (pitched) or a flat-roof grey.
+const WALLS = ["#f6e7c8", "#f3d6c1", "#e9eef2", "#f7f1e3", "#e8dcc8", "#dfe8d8"].map((h) => new THREE.Color(h));
+const ROOFS = ["#c8553d", "#b5483a", "#6c757d", "#4a6fa5", "#7a9e7e", "#8d5a3b"].map((h) => new THREE.Color(h));
+const FLAT_ROOF = new THREE.Color("#b8b2a7");
+function paintBuilding(g, height, pitched, hash) {
+  const wall = WALLS[hash % WALLS.length].clone().lerp(rampColor(height, new THREE.Color()), Math.min(1, Math.max(0, (height - 10) / 60)));
+  const roof = pitched ? ROOFS[(hash >>> 8) % ROOFS.length] : FLAT_ROOF;
+  const n = g.attributes.normal, a = new Float32Array(n.count * 3);
+  for (let k = 0; k < n.count; k++) { const col = n.getY(k) > 0.25 ? roof : wall; a.set([col.r, col.g, col.b], k * 3); }
+  g.setAttribute("color", new THREE.BufferAttribute(a, 3));
+  return g;
+}
+
 const tint = (g, color) => {
   const n = g.attributes.position.count, a = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) a.set([color.r, color.g, color.b], i * 3);
@@ -122,6 +146,47 @@ const { inPolygon } = geo;
 const bounds = (rings) => {
   const xs = rings.flat().map((p) => p[0]), zs = rings.flat().map((p) => p[1]);
   return { x0: Math.min(...xs), x1: Math.max(...xs), z0: Math.min(...zs), z1: Math.max(...zs) };
+};
+
+// A road ribbon of width w along pts ([x, z] local) into L, heights from surf(x, z) + a lift; long segments are split so
+// the ribbon follows the slope, and a disc at every vertex makes round joins and caps.
+const roadMats = {};
+function ribbon(L, pts, w, hex, surf, lift = 0.12) {
+  const c = new THREE.Color(hex), dense = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const [ax, az] = pts[i - 1], [bx, bz] = pts[i], n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / 6));
+    for (let k = 1; k <= n; k++) dense.push([ax + ((bx - ax) * k) / n, az + ((bz - az) * k) / n]);
+  }
+  const vert = (vx, vz) => { L.pos.push(vx, surf(vx, vz) + lift, vz); L.col.push(c.r, c.g, c.b); return L.pos.length / 3 - 1; };
+  const h = w / 2;
+  for (let i = 1; i < dense.length; i++) {
+    const [ax, az] = dense[i - 1], [bx, bz] = dense[i], len = Math.hypot(bx - ax, bz - az) || 1;
+    const nx = (-(bz - az) / len) * h, nz = ((bx - ax) / len) * h;
+    const a0 = vert(ax + nx, az + nz), a1 = vert(ax - nx, az - nz), b0 = vert(bx + nx, bz + nz), b1 = vert(bx - nx, bz - nz);
+    L.idx.push(a0, b0, a1, a1, b0, b1);
+  }
+  for (const [px, pz] of pts) { // round joins/caps
+    const centre = vert(px, pz), ring = [];
+    for (let k = 0; k < 10; k++) ring.push(vert(px + Math.cos((k / 10) * 2 * Math.PI) * h, pz + Math.sin((k / 10) * 2 * Math.PI) * h));
+    for (let k = 0; k < 10; k++) L.idx.push(centre, ring[(k + 1) % 10], ring[k]);
+  }
+}
+
+// A cartoon pine: trunk and two cones, coloured per vertex, drawn instanced per tile.
+const TREE = (() => {
+  const part = (g, hex, dy) => tint(g.translate(0, dy, 0), new THREE.Color(hex));
+  return mergeGeometries([
+    part(new THREE.CylinderGeometry(0.22, 0.3, 2, 6), "#7a5232", 1),
+    part(new THREE.ConeGeometry(2.1, 4, 7), "#3f8f4a", 3.6),
+    part(new THREE.ConeGeometry(1.5, 3.2, 7), "#4fa457", 5.8),
+  ]);
+})();
+const MASK_PX = 512; // ~1.6 m per pixel
+const TREE_SPACING = 9, TREE_MAX = 6000; // metres between grid cells; cap per tile
+const hexKey = (h) => parseInt(h.slice(1), 16);
+const TREE_DENSITY = { // painted ground colour -> chance of a tree per grid cell
+  [hexKey(STYLE.landuse.wood)]: 0.9, [hexKey(STYLE.landuse.nature_reserve)]: 0.7, [hexKey(STYLE.landuse.park)]: 0.18,
+  [hexKey(STYLE.landuse.scrub)]: 0.15, [hexKey(STYLE.landuse.cemetery)]: 0.1,
 };
 
 const G = 65; // ground patch verts per side (~12 m apart)
@@ -158,10 +223,46 @@ async function loadTile(x, y) {
   gg.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
   gg.setIndex(idx); gg.computeVertexNormals();
   const cv = document.createElement("canvas"); cv.width = cv.height = GROUND_PX;
-  paintTile(cv.getContext("2d"), vt, GROUND_PX, tileMPerPx(BUILD_Z, geo.tileYToLat(y + 0.5, BUILD_Z), GROUND_PX));
+  paintTile(cv.getContext("2d"), vt, GROUND_PX, tileMPerPx(BUILD_Z, geo.tileYToLat(y + 0.5, BUILD_Z), GROUND_PX), { roads: false });
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  objects.push(new THREE.Mesh(gg, new THREE.MeshLambertMaterial({ map: tex })));
+  objects.push(new THREE.Mesh(gg, toon({ map: tex })));
+  // where trees may grow: a small paint of the same tile *with* roads, so trees keep off roads and paths
+  const mask = new OffscreenCanvas(MASK_PX, MASK_PX).getContext("2d", { willReadFrequently: true });
+  paintTile(mask, vt, MASK_PX, tileMPerPx(BUILD_Z, geo.tileYToLat(y + 0.5, BUILD_Z), MASK_PX));
+  const groundPx = mask.getImageData(0, 0, MASK_PX, MASK_PX).data;
+
+  // roads: ribbons draped on the ground patch's own surface (bilinear on its grid), casings under fills
+  const surf = (lx, lz) => {
+    const [lon, lat] = frame.toLonLat(lx, lz);
+    const u = Math.max(0, Math.min(G - 1.001, (geo.lonToTileX(lon, BUILD_Z) - x) * (G - 1)));
+    const v = Math.max(0, Math.min(G - 1.001, (geo.latToTileY(lat, BUILD_Z) - y) * (G - 1)));
+    const i = Math.floor(u), j = Math.floor(v), a = u - i, b = v - j, Y = (ii, jj) => pos[(jj * G + ii) * 3 + 1];
+    return (Y(i, j) * (1 - a) + Y(i + 1, j) * a) * (1 - b) + (Y(i, j + 1) * (1 - a) + Y(i + 1, j + 1) * a) * b;
+  };
+  const layers = {}; // name -> {pos: [], col: [], idx: []}
+  const add = (name) => (layers[name] ??= { pos: [], col: [], idx: [] });
+  for (const f of layerFeatures("roads")) {
+    if (f.type !== 2 || f.properties.is_tunnel || f.properties.is_bridge) continue;
+    const st = STYLE.road(f.properties);
+    if (!st) continue;
+    const [w, fill, casing] = st, major = f.properties.kind === "highway" || f.properties.kind === "major_road";
+    for (const line of f.loadGeometry()) {
+      const pts = line.map((p) => fromTile(p.x * (E / f.extent), p.y * (E / f.extent)));
+      if (casing) ribbon(add("casing"), pts, w + 0.8, casing, surf); // a thin ink edge, 0.4 m a side
+      ribbon(add(major ? "major" : "minor"), pts, w, fill, surf);
+    }
+  }
+  // draw order without z-fighting: each layer a step closer to the camera in depth
+  for (const [name, off] of [["casing", -2], ["minor", -4], ["major", -6]]) {
+    const L = layers[name];
+    if (!L) continue;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(L.pos, 3));
+    g.setAttribute("color", new THREE.Float32BufferAttribute(L.col, 3));
+    g.setIndex(L.idx); g.computeVertexNormals();
+    objects.push(new THREE.Mesh(g, roadMats[name] ??= toon({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: off, polygonOffsetUnits: off })));
+  }
 
   // buildings
   const geoms = [], foots = [], c = new THREE.Color();
@@ -185,14 +286,24 @@ async function loadTile(x, y) {
       const bottom = minH > 0 ? hi + minH : lo, top = hi + height;
       const shape = new THREE.Shape(outer.map(([px, pz]) => new THREE.Vector2(px, -pz)));
       shape.holes = holes.map((h) => new THREE.Path(h.map(([px, pz]) => new THREE.Vector2(px, -pz))));
+      // small, low, simple buildings get a pitched roof: a bevel that insets the top cap, which works for any footprint
+      const area = Math.abs(geo.ringArea(outer)), perim = outer.reduce((s, p, k) => s + Math.hypot(p[0] - outer[(k + 1) % outer.length][0], p[1] - outer[(k + 1) % outer.length][1]), 0);
+      const pitched = !minH && !holes.length && area < 450 && height < 16;
+      const roofH = Math.min(3.5, Math.max(1.2, Math.sqrt(area) * 0.18)), inset = Math.min(roofH, ((2 * area) / perim) * 0.85);
+      const g = new THREE.ExtrudeGeometry(shape, pitched
+        ? { depth: top - bottom, bevelEnabled: true, bevelThickness: roofH, bevelSize: inset, bevelOffset: -inset, bevelSegments: 1 }
+        : { depth: top - bottom, bevelEnabled: false });
       // extrude along +z, stand up: (sx, sy, d) -> (sx, d, -sy) = (x, up, z)
-      const g = new THREE.ExtrudeGeometry(shape, { depth: top - bottom, bevelEnabled: false });
       g.rotateX(-Math.PI / 2).translate(0, bottom - base, 0);
-      geoms.push(tint(g, rampColor(height, c)));
+      geoms.push(paintBuilding(g, height, pitched, (i * 2654435761 + x * 31 + y * 17) >>> 0));
       if (minH < 2) foots.push({ ring: outer, ...bounds([outer]) }); // raised parts don't block the street
     }
   });
-  if (geoms.length) { objects.push(new THREE.Mesh(mergeGeometries(geoms), buildingMat)); geoms.forEach((g) => g.dispose()); }
+  if (geoms.length) {
+    const merged = mergeGeometries(geoms);
+    geoms.forEach((g) => g.dispose());
+    objects.push(new THREE.Mesh(merged, buildingMat), new THREE.LineSegments(new THREE.EdgesGeometry(merged, 25), inkMat));
+  }
 
   // bridges: decks between their ends' ground, never below ground + 0.6 m
   const decks = [], bridges = [];
@@ -219,6 +330,27 @@ async function loadTile(x, y) {
     }
   }
   if (decks.length) { objects.push(new THREE.Mesh(mergeGeometries(decks), bridgeMat)); decks.forEach((g) => g.dispose()); }
+
+  // trees: a jittered grid, kept only where the painted ground is wood or park (so never on roads or water)
+  const mpp = tileMPerPx(BUILD_Z, geo.tileYToLat(y + 0.5, BUILD_Z), MASK_PX), stepPx = TREE_SPACING / mpp, m = new THREE.Matrix4();
+  const spots = [];
+  for (let j = 0; j * stepPx < MASK_PX && spots.length < TREE_MAX; j++) for (let i = 0; i * stepPx < MASK_PX; i++) {
+    const h = ((i * 73856093) ^ (j * 19349663) ^ (x * 83492791) ^ y) >>> 0, r = (s) => ((h >>> s) & 255) / 255;
+    const px = Math.min(MASK_PX - 1, (i + r(0)) * stepPx) | 0, py = Math.min(MASK_PX - 1, (j + r(8)) * stepPx) | 0, o = (py * MASK_PX + px) * 4;
+    const density = TREE_DENSITY[(groundPx[o] << 16) | (groundPx[o + 1] << 8) | groundPx[o + 2]];
+    if (!density || r(16) > density) continue;
+    const [lx, lz] = fromTile((px / MASK_PX) * E, (py / MASK_PX) * E), gy = groundAt(lx, lz);
+    if (!Number.isFinite(gy) || foots.some((f) => within(lx, lz, f, 2) && geo.pointInRing(lx, lz, f.ring))) continue;
+    spots.push([lx, gy - base, lz, 0.75 + r(24) * 0.9, r(4) * 6.28, r(12)]);
+  }
+  if (spots.length) {
+    const trees = new THREE.InstancedMesh(TREE, treeMat, spots.length), tc = new THREE.Color();
+    spots.forEach(([tx, ty, tz, s, rot, shade], k) => {
+      trees.setMatrixAt(k, m.makeRotationY(rot).scale(new THREE.Vector3(s, s, s)).setPosition(tx, ty, tz));
+      trees.setColorAt(k, tc.setHSL(0, 0, 0.8 + shade * 0.35)); // multiplies the vertex colours: lighter/darker pines
+    });
+    objects.push(trees);
+  }
 
   objects.forEach((o) => scene.add(o));
   return { objects, foots, water, bridges };
@@ -258,7 +390,8 @@ function stream() {
   for (const [k, p] of tiles) if (!keep.has(k)) {
     tiles.delete(k); ready.delete(k);
     p.then((t) => t?.objects.forEach((o) => {
-      scene.remove(o); o.geometry.dispose();
+      scene.remove(o);
+      if (o.isInstancedMesh) o.dispose(); else o.geometry.dispose(); // trees share one geometry
       if (o.material.map) { o.material.map.dispose(); o.material.dispose(); }
     }));
   }

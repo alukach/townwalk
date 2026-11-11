@@ -44,6 +44,7 @@ function features(layer, by = rank) {
 
 // Paint tile `vt` into ctx's [0, size] square. mPerPx: metres per canvas pixel (sets line widths).
 // opts.buildings: draw footprints (maps). opts.bridges: draw bridge roads (off for the 3D ground, which has decks).
+// opts.roads === false: skip roads (the 3D ground draws them as geometry, which stays sharp up close).
 export function paintTile(ctx, vt, size, mPerPx, opts = {}) {
   const L = vt.layers;
   const E = (L.earth ?? L.roads ?? L.water ?? Object.values(L)[0])?.extent ?? 4096, s = size / E;
@@ -72,7 +73,7 @@ export function paintTile(ctx, vt, size, mPerPx, opts = {}) {
       ctx.strokeStyle = STYLE.water; ctx.lineWidth = px(STYLE.river[f.properties.kind] ?? 3, 1); path(f); ctx.stroke();
     }
   }
-  const roads = features(L.roads).filter((f) => f.type === 2 && !f.properties.is_tunnel && (opts.bridges || !f.properties.is_bridge));
+  const roads = opts.roads === false ? [] : features(L.roads).filter((f) => f.type === 2 && !f.properties.is_tunnel && (opts.bridges || !f.properties.is_bridge));
   const outline = px(1.2, 0.8);
   for (const f of roads) { // casings first so crossings merge
     const st = STYLE.road(f.properties);

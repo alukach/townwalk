@@ -26,6 +26,9 @@ No build step: `index.html` loads three.js, pmtiles, vector-tile and pbf from js
 Why not Overture GeoParquet: the `fused/overture` row groups span ~6° of longitude, so the smallest range read
 for one town is megabytes. Overture can come back if a finer-partitioned copy shows up.
 
+Range reads use `cache: "no-store"`: Chrome's HTTP cache locks per URL, so parallel ranges of one `.pmtiles`
+file queue behind each other ("Stalled" in devtools). Decoded tiles are cached in memory instead.
+
 ## Steps
 
 Each step is a commit you can check out.
@@ -44,5 +47,12 @@ Each step is a commit you can check out.
   - Buildings like MapLibre's `fill-extrusion`: `min_height` to `height`, coloured lightgray → royalblue → lightblue
     by height. On slopes, walls reach down to the lowest corner.
   ![](docs/step3-bridge.png) ![](docs/step3-map.png)
-- [ ] **4. Cartoon look.** Toon shading and outlines, roofs, trees in woods and parks.
+- [x] **4. Cartoon look.**
+  - Toon shading (three flat bands) everywhere; ink lines on building edges; an outlined walker.
+  - Pitched (hipped) roofs on small, low buildings, from a bevel that insets the top cap; any footprint works.
+    Pastel walls drift into MapLibre's height ramp as buildings get taller.
+  - Roads are draped ribbons (casing + fill, round joins) on the ground's own surface, so they stay sharp at
+    street level; the ground texture keeps land use and water.
+  - Instanced pines on a jittered grid, kept where a small road-aware paint of the tile says wood or park.
+  ![](docs/step4-aerial.png) ![](docs/step4-trees.png) ![](docs/step4-street.png)
 - [ ] **5. Any town.** Place search, re-origin when far from start, terrain seams, loading by view direction.
