@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import { computeBoundsTree, acceleratedRaycast } from "three-mesh-bvh";
 import { stats, dem, getVT } from "./data.js";
 import { paintTile, tileMPerPx, STYLE } from "./paint.js";
 import { setupMaps } from "./map.js";
@@ -7,6 +8,10 @@ import { bakeRoads, groundMaterial, roadStyleId, ROAD_STYLE } from "./roads.js";
 import * as geo from "./geo.js";
 import { setupLabels, POI_ICON } from "./labels.js";
 import { setupSearch } from "./search.js";
+
+// Raycasts against buildings (camera vs walls, labels vs what's in front of them) go through a BVH per tile mesh.
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 // ---- where -----------------------------------------------------------------------------------------------------
 const q = new URLSearchParams(location.search);
@@ -58,6 +63,7 @@ const inkMat = new THREE.LineBasicMaterial({ color: 0x2d2a32 });
 const bridgeMat = toon({ vertexColors: true });
 const terrainMat = toon({ vertexColors: true, side: THREE.DoubleSide }); // double: skirts face either way
 const treeMat = toon({ vertexColors: true });
+const propMat = toon({ vertexColors: true }); // street furniture: the camera ignores it (a lamp post shouldn't yank it in)
 const playerGeo = new THREE.CapsuleGeometry(0.35, 1.1, 4, 12);
 const player = new THREE.Mesh(playerGeo, toon({ color: 0xe4572e }));
 player.castShadow = true;
@@ -406,6 +412,7 @@ async function loadTile(x, y) {
   if (geoms.length) {
     const merged = mergeGeometries(geoms);
     geoms.forEach((g) => g.dispose());
+    merged.computeBoundsTree();
     objects.push(Object.assign(new THREE.Mesh(merged, buildingMat), { castShadow: true, receiveShadow: true }), new THREE.LineSegments(new THREE.EdgesGeometry(merged, 25), inkMat));
   }
 
@@ -439,7 +446,7 @@ async function loadTile(x, y) {
   for (const p of named) p.y ??= groundAt(p.x, p.z) - base + 3;
   const propCells = new Map();
   for (const [kind, spots] of Object.entries(props)) {
-    const inst = new THREE.InstancedMesh(PROP[kind], treeMat, spots.length), mm = new THREE.Matrix4();
+    const inst = new THREE.InstancedMesh(PROP[kind], propMat, spots.length), mm = new THREE.Matrix4();
     spots.forEach(([px, pz], k) => {
       const gy = groundAt(px, pz), yaw = ((((px * 73856093) ^ (pz * 19349663)) >>> 0) % 628) / 100;
       inst.setMatrixAt(k, mm.makeRotationY(yaw).setPosition(px, (Number.isFinite(gy) ? gy : base) - base, pz));
@@ -658,7 +665,7 @@ async function findArea() {
 
 // ---- loop --------------------------------------------------------------------------------------------------------
 const hud = document.getElementById("hud");
-const ray = new THREE.Raycaster();
+const ray = new THREE.Raycaster(), occ = new THREE.Raycaster(), occDir = new THREE.Vector3();
 const camPos = new THREE.Vector3(), camGoal = new THREE.Vector3(), look = new THREE.Vector3();
 const maps = setupMaps({ player: () => { const [lon, lat] = frame.toLonLat(walker.x, walker.z); return { lon, lat, yaw: walker.yaw }; }, teleport });
 const labels = setupLabels(camera);
@@ -679,7 +686,9 @@ renderer.setAnimationLoop((now) => {
   look.set(walker.x, py + 1.4, walker.z);
   ray.set(look, camGoal.clone().sub(look).normalize());
   ray.far = camGoal.distanceTo(look);
-  const hit = ray.intersectObjects(scene.children.filter((m) => m.material === buildingMat || m.material === treeMat), false)[0]; // walls and trees
+  const walls = scene.children.filter((m) => m.material === buildingMat);
+  ray.firstHitOnly = true;
+  const hit = ray.intersectObjects([...walls, ...scene.children.filter((m) => m.material === treeMat)], false)[0]; // walls and trees
   if (hit) camGoal.copy(look).addScaledVector(ray.ray.direction, Math.max(0.5, hit.distance - 0.4));
   camPos.lerp(camGoal, camPos.lengthSq() && !hit ? 1 - Math.exp(-6 * dt) : 1);
   camera.position.copy(camPos);
@@ -690,7 +699,13 @@ renderer.setAnimationLoop((now) => {
   sun.position.copy(sun.target.position).addScaledVector(SUN_DIR, 700);
   renderer.render(scene, camera);
   maps.draw();
-  labels.update([...ready.values()].flatMap((t) => t.named), walker);
+  // a label is hidden when a building stands between the camera and it
+  const occluded = (p) => {
+    const dir = occDir.set(p.x, p.y, p.z).sub(camera.position), d = dir.length();
+    occ.set(camera.position, dir.divideScalar(d)); occ.far = d - 1.5; occ.firstHitOnly = true;
+    return occ.intersectObjects(walls, false).length > 0;
+  };
+  labels.update([...ready.values()].flatMap((t) => t.named), walker, occluded);
   if (now - lastWhere > 400) { lastWhere = now; labels.where(streetAt(walker.x, walker.z), area); findArea(); }
   const [lon, lat] = frame.toLonLat(walker.x, walker.z);
   hud.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)} · ${Number.isFinite(walker.y) ? Math.round(walker.y) + " m" : "loading…"}

@@ -12,7 +12,7 @@ export function setupLabels(camera) {
 
   return {
     // pois: [{x, y, z, name, icon}] in world coords; walker: {x, z}
-    update(pois, walker) {
+    update(pois, walker, occluded = () => false) {
       const near = [];
       for (const p of pois) { const d = Math.hypot(p.x - walker.x, p.z - walker.z); if (d < RANGE) near.push([d, p]); }
       near.sort((a, b) => a[0] - b[0]);
@@ -27,6 +27,7 @@ export function setupLabels(camera) {
           [d, p] = uniq[next];
           v.set(p.x, p.y, p.z).project(camera);
           if (v.z > 1 || Math.abs(v.x) > 1.1 || Math.abs(v.y) > 1.1) continue; // behind / off screen
+          if (occluded(p)) continue; // a building is in the way
           sx = ((v.x + 1) / 2) * W; sy = ((1 - v.y) / 2) * H;
           const w = 9 * p.name.length + 40; // ponytail: estimated width, no layout read per frame
           if (placed.some((b) => Math.abs(b[0] - sx) < (b[2] + w) / 2 && Math.abs(b[1] - sy) < 26)) continue;

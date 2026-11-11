@@ -76,6 +76,12 @@ export function paintTile(ctx, vt, size, mPerPx, opts = {}) {
   ctx.fillStyle = STYLE.water; ctx.fillRect(0, 0, size, size);
   ctx.fillStyle = STYLE.land;
   for (const f of features(L.earth)) if (f.type === 3) { path(f); ctx.fill("nonzero"); }
+  ctx.save(); // paving only on land (clip to earth), so waterfront buildings don't pave the sea
+  ctx.beginPath();
+  for (const f of features(L.earth)) if (f.type === 3) for (const ring of f.loadGeometry()) ring.forEach((p, i) => (i ? ctx.lineTo(p.x * s, p.y * s) : ctx.moveTo(p.x * s, p.y * s)));
+  ctx.clip("nonzero");
+  paveDense(ctx, L.buildings, size, mPerPx);
+  ctx.restore();
   for (const f of features(L.landuse, order)) {
     const c = f.type === 3 && STYLE.landuse[f.properties.kind];
     if (c) { ctx.fillStyle = c; path(f); ctx.fill("nonzero"); }
@@ -108,6 +114,34 @@ export function paintTile(ctx, vt, size, mPerPx, opts = {}) {
     }
   if (opts.labels) drawLabels(ctx, L, s, size);
   ctx.restore();
+}
+
+// Dense built-up land is paved, not grass: OSM rarely maps the plazas and lots between downtown buildings, so the
+// default land colour turned Manhattan's blocks green. Building coverage, blurred over ~30 m, decides: above ~30%
+// the ground fades to paving; suburbs (houses on yards, ~15%) stay green. Parks and other land use paint over it.
+const PAVE = [216, 210, 198], D = 64; // colour; coverage grid cells per tile side (~12 m at z15)
+function paveDense(ctx, layer, size, mPerPx) {
+  if (!layer?.length) return;
+  const cover = new OffscreenCanvas(D, D), cg = cover.getContext("2d"), k = D / layer.extent;
+  cg.fillStyle = "#fff";
+  for (let i = 0; i < layer.length; i++) {
+    const f = layer.feature(i);
+    if (f.type !== 3) continue;
+    cg.beginPath();
+    for (const ring of f.loadGeometry()) ring.forEach((p, j) => (j ? cg.lineTo(p.x * k, p.y * k) : cg.moveTo(p.x * k, p.y * k)));
+    cg.fill("nonzero");
+  }
+  const cell = (mPerPx * size) / D, blur = new OffscreenCanvas(D, D), bg = blur.getContext("2d", { willReadFrequently: true });
+  bg.filter = `blur(${(30 / cell).toFixed(2)}px)`;
+  bg.drawImage(cover, 0, 0);
+  const img = bg.getImageData(0, 0, D, D), a = img.data;
+  for (let i = 0; i < a.length; i += 4) {
+    const t = Math.min(1, Math.max(0, (a[i + 3] / 255 - 0.22) / 0.14)); // coverage 22% -> 36%: grass -> paving
+    a[i] = PAVE[0]; a[i + 1] = PAVE[1]; a[i + 2] = PAVE[2]; a[i + 3] = Math.round(t * t * (3 - 2 * t) * 255);
+  }
+  bg.filter = "none"; bg.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(blur, 0, 0, size, size);
 }
 
 // Street names on each named road's longest segment (kept upright, skipped if it won't fit), then POI icons.

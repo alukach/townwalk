@@ -29,7 +29,7 @@
     #results li { padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; }
     #results li:hover { background: #ffd16655; }
     #labels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
-    .poi { position: absolute; left: 0; top: 0; white-space: nowrap; font: 700 15px system-ui, sans-serif; color: #23262e;
+    .poi { position: absolute; left: 0; top: 0; transition: opacity 0.25s; white-space: nowrap; font: 700 15px system-ui, sans-serif; color: #23262e;
       background: #fffe; border: 2px solid #23262e; border-radius: 14px; padding: 2px 9px 2px 6px; transform-origin: 50% 100%; }
     .poi span { margin-left: 5px; }
     #where { position: fixed; right: 16px; top: 12px; text-align: right; color: #fff; text-shadow: 0 2px 0 #23262e, 0 0 6px #23262e;
@@ -68,7 +68,8 @@
         "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
         "pmtiles": "https://cdn.jsdelivr.net/npm/pmtiles@3.2.1/+esm",
         "@mapbox/vector-tile": "https://cdn.jsdelivr.net/npm/@mapbox/vector-tile@2.0.3/+esm",
-        "pbf": "https://cdn.jsdelivr.net/npm/pbf@4.0.1/+esm"
+        "pbf": "https://cdn.jsdelivr.net/npm/pbf@4.0.1/+esm",
+        "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.8.3/build/index.module.js"
       }
     }
   </script>

@@ -16,6 +16,9 @@ node --test                   # geo math tests
 No build step: `index.html` loads three.js, pmtiles, vector-tile and pbf from jsDelivr through an import map.
 `?aerial=600` puts the camera 600 m up (debugging).
 
+Dense built-up land is paved (building coverage blurred over ~30 m decides), suburbs stay green. Labels hide when
+a building is between them and the camera (raycasts through a BVH per tile, `three-mesh-bvh`).
+
 ## Data (all range-read from source.coop, nothing pre-downloaded)
 
 | Layer | Source | Tiles |
