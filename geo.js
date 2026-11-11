@@ -47,5 +47,27 @@ export function pointInRing(px, pz, r) {
 // Overlapping outers stay filled (unlike even-odd).
 export const inPolygon = (x, z, rings) => rings.reduce((w, r) => w + (pointInRing(x, z, r) ? Math.sign(ringArea(r)) : 0), 0) > 0;
 
+// Medians of dual carriageways: pairs of one-way segments of the same street, running opposite ways, 4-30 m apart and
+// overlapping by 5+ m. Segments are {ax, az, bx, bz, name} in any units; k converts units to metres. Returns quads
+// [a, b, b', a'] (a, b on one carriageway, the primes their projections on the other) and the median's width (m).
+export function medianQuads(segs, k = 1, minW = 4, maxW = 30) {
+  const out = [];
+  for (let i = 0; i < segs.length; i++)
+    for (let j = i + 1; j < segs.length; j++) {
+      const A = segs[i], B = segs[j];
+      if (!A.name || A.name !== B.name) continue;
+      const ax = A.bx - A.ax, az = A.bz - A.az, bx = B.bx - B.ax, bz = B.bz - B.az;
+      const la = Math.hypot(ax, az), lb = Math.hypot(bx, bz);
+      if (!la || !lb || (ax * bx + az * bz) / (la * lb) > -0.9) continue; // must run opposite ways
+      const proj = (px, pz) => { const t = Math.max(0, Math.min(1, ((px - B.ax) * bx + (pz - B.az) * bz) / (lb * lb))); return [B.ax + t * bx, B.az + t * bz, t]; };
+      const p0 = proj(A.ax, A.az), p1 = proj(A.bx, A.bz);
+      if (Math.abs(p1[2] - p0[2]) * lb * k < 5) continue; // too little overlap
+      const w = (Math.abs((((A.ax + A.bx) / 2 - B.ax) * bz - ((A.az + A.bz) / 2 - B.az) * bx)) / lb) * k; // A's middle to B's line
+      if (w < minW || w > maxW) continue;
+      out.push({ quad: [[A.ax, A.az], [A.bx, A.bz], [p1[0], p1[1]], [p0[0], p0[1]]], width: w });
+    }
+  return out;
+}
+
 // Mapbox terrain-RGB, as smartmaps/gel packs it.
 export const rgbToHeight = (r, g, b) => -10000 + (r * 65536 + g * 256 + b) * 0.1;

@@ -4,7 +4,7 @@ import { computeBoundsTree, acceleratedRaycast } from "three-mesh-bvh";
 import { stats, dem, getVT } from "./data.js";
 import { paintTile, tileMPerPx, STYLE } from "./paint.js";
 import { setupMaps } from "./map.js";
-import { bakeRoads, groundMaterial, roadStyleId, ROAD_STYLE } from "./roads.js";
+import { bakeRoads, groundMaterial, roadStyleId, ROAD_STYLE, ZEBRA } from "./roads.js";
 import * as geo from "./geo.js";
 import { setupLabels, POI_ICON } from "./labels.js";
 import { setupSearch } from "./search.js";
@@ -281,9 +281,18 @@ const PROP = (() => {
     bicycle_parking: merge(part(Box(1.6, 0.06, 0.06), "#8a8a8a", 0, 0.8), part(Box(0.06, 0.8, 0.06), "#8a8a8a", -0.75, 0.4), part(Box(0.06, 0.8, 0.06), "#8a8a8a", 0.75, 0.4)),
     post_box: merge(part(Box(0.5, 1.1, 0.45), "#c1121f", 0, 0.55), part(Box(0.52, 0.08, 0.47), "#780000", 0, 1.1)),
     drinking_water: merge(part(Cyl(0.15, 0.2, 0.9, 8), "#6c757d", 0, 0.45), part(Ball(0.12), "#4fb3e8", 0, 0.95)),
+    // street trees (OSM natural=tree points, and the medians of boulevards): round crowns, unlike the woods' pines
+    tree: merge(part(Cyl(0.2, 0.28, 2.8, 7), "#7a5232", 0, 1.4), part(new THREE.SphereGeometry(2.0, 10, 8), "#5fae57", 0, 4.3),
+      part(new THREE.SphereGeometry(1.4, 10, 8), "#6fbf62", 0.9, 5.2, 0.4)),
+    bus_stop: merge(part(Cyl(0.05, 0.05, 2.7, 6), "#8a8a8a", 1.8, 1.35), part(Box(0.55, 0.55, 0.04), "#2e86ab", 1.8, 2.7),
+      part(Box(3, 0.08, 1.4), "#3d4a3d", 0, 2.4, -0.2), part(Box(3, 2.3, 0.05), "#9fc3d9", 0, 1.15, -0.85),
+      part(Box(0.08, 2.4, 0.08), "#3d4a3d", -1.45, 1.2, 0.45), part(Box(0.08, 2.4, 0.08), "#3d4a3d", 1.45, 1.2, 0.45)),
+    subway_entrance: merge(part(Cyl(0.06, 0.06, 2.4, 6), "#2a6e3f", 0, 1.2), part(Ball(0.25), "#9be29f", 0, 2.5),
+      part(Box(0.05, 1, 2.5), "#2a6e3f", -0.9, 0.5), part(Box(0.05, 1, 2.5), "#2a6e3f", 0.9, 0.5)),
   };
 })();
-const PROP_RADIUS = { street_lamp: 0.25, bench: 0.6, picnic_table: 1, traffic_signals: 0.25, stop: 0.2, waste_basket: 0.3, post_box: 0.35, drinking_water: 0.25 };
+const CAR_ROAD = new Set(["highway", "major_road", "minor_road"]);
+const PROP_RADIUS = { tree: 0.45, bus_stop: 0.3, subway_entrance: 0.3, street_lamp: 0.25, bench: 0.6, picnic_table: 1, traffic_signals: 0.25, stop: 0.2, waste_basket: 0.3, post_box: 0.35, drinking_water: 0.25 };
 
 const MASK_PX = 512; // ~1.6 m per pixel
 const TREE_SPACING = 7.3, TREE_MAX = PROFILE.treeMax; // metres between grid cells (woods 1.5x the old 9 m grid); cap per tile
@@ -334,7 +343,7 @@ async function loadTile(x, y) {
   tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
   // roads: a baked distance field the ground paints from (roads.js), so they drape exactly
   const [x0m, z0m] = fromTile(0, 0), [x1m, z1m] = fromTile(E, E), Wm = x1m - x0m, Hm = z1m - z0m; // tile size, metres
-  const segs = [], streets = [], roadLines = []; // roadLines: every drawn road, local metres (doors face them)
+  const segs = [], streets = [], roadLines = [], carSegs = [], oneways = []; // roadLines: every drawn road (doors face them)
   for (const f of layerFeatures("roads")) {
     if (f.type !== 2) continue;
     const id = roadStyleId(f.properties);
@@ -345,11 +354,35 @@ async function loadTile(x, y) {
         const [ax, az] = pts[i - 1], [bx, bz] = pts[i];
         if (id) segs.push({ ax: ax - x0m, ay: z1m - az, bx: bx - x0m, by: z1m - bz, hw: ROAD_STYLE[id].width / 2, id, along });
         if (id && f.properties.kind !== "rail") roadLines.push([ax, az, bx, bz]);
+        if (id && CAR_ROAD.has(f.properties.kind)) carSegs.push({ ax, az, bx, bz, hw: ROAD_STYLE[id].width / 2 });
+        if (f.properties.oneway && f.properties.name && f.properties.kind !== "highway" && !f.properties.is_bridge && !f.properties.is_tunnel && CAR_ROAD.has(f.properties.kind)) oneways.push({ ax, az, bx, bz, name: f.properties.name });
         if (f.properties.name && f.properties.kind !== "path" && f.properties.kind !== "rail")
           streets.push({ ax, az, bx, bz, name: f.properties.name, ref: f.properties.ref });
         along += Math.hypot(bx - ax, bz - az);
       }
     }
+  }
+  // zebra crossings: at each OSM crossing point on a car road, a short segment laid across that road
+  const toBake = (lx, lz) => [lx - x0m, z1m - lz];
+  for (const f of layerFeatures("pois")) {
+    if (f.type !== 1 || f.properties.kind !== "crossing") continue;
+    const q = f.loadGeometry()[0][0], [cx, cz] = fromTile(q.x * (E / f.extent), q.y * (E / f.extent));
+    let best = null;
+    for (const s of carSegs) {
+      const dx = s.bx - s.ax, dz = s.bz - s.az, l2 = dx * dx + dz * dz || 1, t = Math.max(0, Math.min(1, ((cx - s.ax) * dx + (cz - s.az) * dz) / l2));
+      const px = s.ax + t * dx, pz = s.az + t * dz, d = Math.hypot(cx - px, cz - pz);
+      if (d < s.hw + 1 && (!best || d < best.d)) best = { d, px, pz, ux: dx / Math.sqrt(l2), uz: dz / Math.sqrt(l2), hw: s.hw };
+    }
+    if (!best || best.hw < 2.5) continue; // service lanes don't get zebras
+    const r = best.hw - 0.5, [ax, ay] = toBake(best.px - best.uz * r, best.pz + best.ux * r), [bx, by] = toBake(best.px + best.uz * r, best.pz - best.ux * r);
+    segs.push({ ax, ay, bx, by, hw: ROAD_STYLE[ZEBRA].width / 2, id: ZEBRA, along: 0 });
+  }
+  // boulevards: trees down the median between dual carriageways
+  const medianTrees = [];
+  for (const { quad: [a, b, b2, a2], width } of geo.medianQuads(oneways)) {
+    if (width < 3.5) continue;
+    const m0 = [(a[0] + a2[0]) / 2, (a[1] + a2[1]) / 2], m1 = [(b[0] + b2[0]) / 2, (b[1] + b2[1]) / 2], L = Math.hypot(m1[0] - m0[0], m1[1] - m0[1]);
+    for (let d = 5; d < L - 3; d += 11) medianTrees.push([m0[0] + ((m1[0] - m0[0]) * d) / L, m0[1] + ((m1[1] - m0[1]) * d) / L]);
   }
   const roadTex = bakeRoads(renderer, segs, Wm, Hm, PROFILE.roadPx);
   objects.push(Object.assign(new THREE.Mesh(gg, groundMaterial(bands, tex, roadTex)), { receiveShadow: true }));
@@ -359,7 +392,7 @@ async function loadTile(x, y) {
   const groundPx = mask.getImageData(0, 0, MASK_PX, MASK_PX).data;
 
   // POIs: named ones become labels (and style the building they're in); street furniture becomes props
-  const named = [], props = {}, places = [];
+  const named = [], props = { tree: medianTrees }, places = [];
   for (const f of layerFeatures("pois")) {
     if (f.type !== 1) continue;
     const p = f.loadGeometry()[0][0], [lx, lz] = fromTile(p.x * (E / f.extent), p.y * (E / f.extent)), k = f.properties.kind;
@@ -381,10 +414,12 @@ async function loadTile(x, y) {
   // buildings
   const geoms = [], foots = [], c = new THREE.Color();
   // Like OpenMapTiles' hide_3d: a building whose parts are mapped (building:part) is drawn as its parts only; its
-  // outline would otherwise be a full-height block hiding the setbacks. Test a point inside each part.
+  // outline would otherwise be a full-height block hiding the setbacks. Only when the parts cover most of it, though:
+  // a mall with one part mapped should still be a mall. (Parts found by a point inside each; areas in m².)
   const partPoints = layerFeatures("buildings").filter((f) => f.type === 3 && f.properties.kind === "building_part").map((f) => {
-    const r = f.loadGeometry()[0], p = r.reduce((s, q) => [s[0] + q.x, s[1] + q.y], [0, 0]).map((v) => v / r.length);
-    return fromTile(p[0] * (E / f.extent), p[1] * (E / f.extent));
+    const r = f.loadGeometry()[0].map((q) => fromTile(q.x * (E / f.extent), q.y * (E / f.extent)));
+    const p = r.reduce((s, q) => [s[0] + q[0], s[1] + q[1]], [0, 0]).map((v) => v / r.length);
+    return [p[0], p[1], Math.abs(geo.ringArea(r))];
   });
   layerFeatures("buildings").forEach((f, i) => {
     if (f.type !== 3) return;
@@ -401,7 +436,8 @@ async function loadTile(x, y) {
     for (const [outer, ...holes] of polys) {
       if (f.properties.kind === "building" && partPoints.length) {
         const ob = bounds([outer]);
-        if (partPoints.some(([px, pz]) => within(px, pz, ob) && geo.pointInRing(px, pz, outer))) { foots.push({ ring: outer, ...ob }); continue; }
+        const covered = partPoints.reduce((s, [px, pz, a]) => s + (within(px, pz, ob) && geo.pointInRing(px, pz, outer) ? a : 0), 0);
+        if (covered >= 0.7 * Math.abs(geo.ringArea(outer))) { foots.push({ ring: outer, ...ob }); continue; }
       }
       const gs = outer.map(([px, pz]) => groundAt(px, pz)).filter(Number.isFinite);
       if (!gs.length) continue;
@@ -471,8 +507,8 @@ async function loadTile(x, y) {
   const decks = [], bridges = [];
   for (const f of layerFeatures("roads")) {
     if (f.type !== 2 || !f.properties.is_bridge) continue;
-    const st = STYLE.road(f.properties), w = st?.[0] ?? 5;
-    c.set(st?.[1] ?? "#dddddd");
+    const sid = roadStyleId({ ...f.properties, is_bridge: false }), w = sid ? ROAD_STYLE[sid].width : 5;
+    c.set(ROAD_STYLE[sid]?.asphalt ?? "#8a8d94"); // decks in the 3D road palette, not the map's
     for (const line of f.loadGeometry()) {
       const pts = line.map((p) => fromTile(p.x * (E / f.extent), p.y * (E / f.extent)));
       const len = [0];
@@ -496,7 +532,13 @@ async function loadTile(x, y) {
   // labels outside buildings float a little over the ground; props stand on it (and block like trees do)
   for (const p of named) p.y ??= groundAt(p.x, p.z) - base + 3;
   const propCells = new Map();
+  const underDeck = ([px, pz]) => bridges.some((s) => { // a tree can't grow up through a viaduct
+    const dx = s.bx - s.ax, dz = s.bz - s.az, l2 = dx * dx + dz * dz || 1, k = Math.max(0, Math.min(1, ((px - s.ax) * dx + (pz - s.az) * dz) / l2));
+    return Math.hypot(px - s.ax - k * dx, pz - s.az - k * dz) < s.w / 2 + 3;
+  });
+  if (props.tree) props.tree = props.tree.filter((p) => !underDeck(p));
   for (const [kind, spots] of Object.entries(props)) {
+    if (!spots.length) continue;
     const inst = new THREE.InstancedMesh(PROP[kind], propMat, spots.length), mm = new THREE.Matrix4();
     spots.forEach(([px, pz], k) => {
       const gy = groundAt(px, pz), yaw = ((((px * 73856093) ^ (pz * 19349663)) >>> 0) % 628) / 100;
@@ -602,13 +644,22 @@ function reorigin(lon, lat) {
   [...demTiles.keys()].forEach(dropDem);
   frame = geo.localFrame(lon, lat); base = null;
   Object.assign(walker, { x: 0, z: 0, y: NaN }); placed = false; camPos.set(0, 0, 0);
+  writeUrl(lon, lat);
+}
+
+// The URL is always a link back to here: where you stand and which way you face (replaceState, so no history spam).
+let lastUrl = "";
+function writeUrl(lon, lat) {
   const p = new URLSearchParams(location.search);
   p.set("lat", lat.toFixed(5)); p.set("lon", lon.toFixed(5));
-  history.replaceState(null, "", `?${p}`); // the URL is always a link back to here
+  p.set("heading", String(Math.round((((-walker.yaw * 180) / Math.PI) % 360 + 360) % 360)));
+  const s = `?${p}`;
+  if (s !== lastUrl) { history.replaceState(null, "", s); lastUrl = s; }
 }
 
 // ---- walking -----------------------------------------------------------------------------------------------------
-const walker = { x: 0, z: 0, y: NaN, yaw: 0 };
+// heading in the URL is compass degrees (0 north, 90 east); yaw is radians, positive turning left from north
+const walker = { x: 0, z: 0, y: NaN, yaw: (-(+q.get("heading") || 0) * Math.PI) / 180 };
 const keys = new Set();
 addEventListener("keydown", (e) => keys.add(e.key.toLowerCase()));
 addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
@@ -721,7 +772,7 @@ const camPos = new THREE.Vector3(), camGoal = new THREE.Vector3(), look = new TH
 const maps = setupMaps({ player: () => { const [lon, lat] = frame.toLonLat(walker.x, walker.z); return { lon, lat, yaw: walker.yaw }; }, teleport });
 const labels = setupLabels(camera);
 setupSearch(teleport);
-let last = performance.now(), lastStream = 0, lastWhere = 0;
+let last = performance.now(), lastStream = 0, lastWhere = 0, lastUrlWrite = 0;
 renderer.setAnimationLoop((now) => {
   const dt = Math.min(0.1, (now - last) / 1000); last = now;
   if (now - lastStream > 500) { stream(); lastStream = now; }
@@ -758,6 +809,7 @@ renderer.setAnimationLoop((now) => {
   };
   labels.update([...ready.values()].flatMap((t) => t.named), walker, occluded);
   if (now - lastWhere > 400) { lastWhere = now; labels.where(streetAt(walker.x, walker.z), area); findArea(); }
+  if (now - lastUrlWrite > 1000 && placed) { lastUrlWrite = now; writeUrl(...frame.toLonLat(walker.x, walker.z)); }
   const [lon, lat] = frame.toLonLat(walker.x, walker.z);
   hud.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)} · ${Number.isFinite(walker.y) ? Math.round(walker.y) + " m" : "loading…"}
 ${ready.size} tiles, ${demReady.size} terrain · ${stats.requests} range requests, ${(stats.bytes / 1024).toFixed(0)} KB`;

@@ -21,8 +21,12 @@ export const ROAD_STYLE = [
   { name: "rail", width: 3.2, asphalt: "#a39e94", walk: 0, dash: null, rail: true, soft: true },
   { name: "tram", width: 1.6, asphalt: null, walk: 0, dash: null, rail: true }, // rails only, laid in the street
   { name: "runway", width: 30, asphalt: "#8f9196", walk: 0, dash: "#ffffff" },
+  // a zebra crossing: a short segment laid *across* a road at an OSM crossing point (main.js); width = its depth
+  // along the road. It always wins over the road under it, and stripes run along it, so bars lie parallel to the road.
+  { name: "zebra", width: 3, asphalt: "#6b6f7a", walk: 0, dash: "#f4f1ea", zebra: true },
 ];
 const ID = Object.fromEntries(ROAD_STYLE.map((s, i) => [s?.name, i]));
+export const ZEBRA = ID.zebra;
 export const SIDEWALK = "#d9d4c7", KERB = "#55545c";
 
 // Protomaps v4 road properties -> style id (0 = don't draw)
@@ -50,6 +54,7 @@ const bakeMat = new THREE.ShaderMaterial({
       vec2 pa = vP - vA, ba = vB - vA;
       float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
       float cd = length(pa - ba * h), sd = cd - vInfo.x;
+      if (int(vInfo.y + 0.5) == ${ROAD_STYLE.findIndex((s) => s?.zebra)}) { if (sd > 0.0) discard; sd = -${RANGE.toFixed(1)} + 0.01; } // zebra: wins inside
       if (sd > ${RANGE.toFixed(1)}) discard;
       float n = (sd + ${RANGE.toFixed(1)}) / ${(2 * RANGE).toFixed(1)};
       gl_FragDepth = n; // the depth test keeps the smallest signed distance: the union of all roads
@@ -93,7 +98,7 @@ const U = {
   uAsphalt: { value: ROAD_STYLE.map((s) => lin(s?.asphalt)) },
   uDash: { value: ROAD_STYLE.map((s) => lin(s?.dash)) },
   // x: half width of the sidewalk band, y: has dash, z: rail, w: has asphalt / soft edge (no kerb) flag
-  uParam: { value: ROAD_STYLE.map((s) => new THREE.Vector4(s?.walk ?? 0, s?.dash ? 1 : 0, s?.rail ? 1 : 0, !s ? 0 : s.asphalt === null ? 0 : s.soft ? 2 : 1)) },
+  uParam: { value: ROAD_STYLE.map((s) => new THREE.Vector4(s?.walk ?? 0, s?.zebra ? 2 : s?.dash ? 1 : 0, s?.rail ? 1 : 0, !s ? 0 : s.asphalt === null ? 0 : s.soft ? 2 : 1)) },
   uSidewalk: { value: lin(SIDEWALK) }, uKerb: { value: lin(KERB) },
   uSteel: { value: lin("#8d9199") }, uSleeper: { value: lin("#6b4f3a") },
 };
@@ -121,7 +126,9 @@ export function groundMaterial(gradientMap, map, roadTex) {
             if (P.x > 0.0) col = mix(col, uSidewalk, 1.0 - smoothstep(P.x - aa, P.x + aa, sd));          // sidewalk
             if (P.w > 0.5) col = mix(col, uAsphalt[id], 1.0 - smoothstep(-aa, aa, sd));                // surface
             if (P.w > 0.5 && P.w < 1.5) col = mix(col, uKerb, 1.0 - smoothstep(0.1 - aa, 0.1 + aa, abs(sd))); // kerb
-            if (P.y > 0.5 && fract(r.b / 7.5) < 0.45) col = mix(col, uDash[id], 1.0 - smoothstep(0.12 - ac, 0.12 + ac, cd)); // centre dashes
+            if (P.y > 0.5 && P.y < 1.5 && fract(r.b / 7.5) < 0.45) col = mix(col, uDash[id], 1.0 - smoothstep(0.12 - ac, 0.12 + ac, cd)); // centre dashes
+            if (P.y > 1.5) { float ab = fwidth(r.b) * 0.8 + 0.01, z = fract(r.b / 1.2); // zebra bars
+              col = mix(col, uDash[id], smoothstep(0.0, ab, z) * (1.0 - smoothstep(0.5 - ab, 0.5 + ab, z))); }
             if (P.z > 0.5) {
               float sleeper = step(fract(r.b / 0.75), 0.35) * (1.0 - smoothstep(1.25 - ac, 1.25 + ac, cd));
               if (P.w > 0.5) col = mix(col, uSleeper, sleeper);

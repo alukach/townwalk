@@ -4,7 +4,7 @@ Walk a cartoon version of a real town in the browser, streamed from open data on
 with HTTP range requests: only the tiles near the walker are fetched. Starting with Nelson, BC; any town by
 `?lat=…&lon=…`.
 
-**Play:** https://alukach.com/raea-townwalk/ · another town: `?lat=51.1784&lon=-115.5708` (Banff)
+**Play:** https://alukach.com/townwalk/ · another town: `?lat=51.1784&lon=-115.5708` (Banff)
 
 ## Run locally
 
@@ -18,6 +18,14 @@ No build step: `index.html` loads three.js, pmtiles, vector-tile and pbf from js
 
 Façades are procedural (`facades.js`): windows per storey and bay, shopfronts with striped awnings, curtain walls on
 towers, and a door on the wall facing the nearest road, all drawn per pixel from façade coordinates on each wall.
+
+City infrastructure from OSM: street trees (`natural=tree` points), planted medians with trees between dual
+carriageways (paired one-ways of the same street), zebra crossings at crossing points (drawn by the road field),
+pedestrian plazas and platforms, bus stops and subway entrances. Parking lots are inferred: a parking point inside a
+retail/commercial/industrial area (and not inside a building, which would be a garage) paves that area as a lot.
+
+The URL is always a link back to where you stand: `?lat=…&lon=…&heading=…` (compass degrees), kept current as you
+walk, so reloads resume and links share the view.
 
 Dense built-up land is paved (building coverage blurred over ~30 m decides), suburbs stay green. Labels hide when
 a building is between them and the camera (raycasts through a BVH per tile, `three-mesh-bvh`).

@@ -34,3 +34,13 @@ test("rings, point in ring, terrain rgb", () => {
   assert.ok(!g.inPolygon(5, 5, [sq, hole]) && g.inPolygon(1, 1, [sq, hole]));
   assert.ok(g.inPolygon(5, 5, [sq, sq])); // overlapping outers stay filled (even-odd would cancel)
 });
+
+test("medians: opposite one-ways 10 m apart pair up; same-way or far ones don't", () => {
+  const north = { ax: 0, az: 0, bx: 0, bz: -100, name: "Dolores St" }, south = { ax: 10, az: -90, bx: 10, bz: 10, name: "Dolores St" };
+  const m = g.medianQuads([north, south]);
+  assert.equal(m.length, 1);
+  assert.ok(Math.abs(m[0].width - 10) < 1e-6);
+  assert.equal(g.medianQuads([north, { ...north, ax: 10, bx: 10 }]).length, 0); // same direction
+  assert.equal(g.medianQuads([north, { ...south, ax: 60, bx: 60 }]).length, 0); // 60 m: separate streets
+  assert.equal(g.medianQuads([north, { ...south, name: "Guerrero St" }]).length, 0);
+});

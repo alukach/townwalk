@@ -1,3 +1,5 @@
+import { inPolygon, medianQuads } from "./geo.js";
+
 // MVT rings wind clockwise (outer) / counter-clockwise (holes), so fills use nonzero: evenodd cancels where
 // clipped rings overlap (whole-tile squares), which punched tile-shaped holes in woods.
 // One cartoon style for OSM vector tiles, painted to a canvas: the 3D ground texture, the minimap and the full map.
@@ -12,10 +14,31 @@ export const POI_ICON = {
   townhall: "🏛️", courthouse: "⚖️", police: "🚓", fire_station: "🚒", museum: "🏛️", theatre: "🎭", cinema: "🎬",
   arts_centre: "🎨", community_centre: "🏘️", sports_centre: "🏟️", ice_rink: "⛸️", swimming_pool: "🏊", stadium: "🏟️",
   park: "🌳", playground: "🛝", garden: "🌷", viewpoint: "🔭", attraction: "⭐", information: "ℹ️",
-  place_of_worship: "⛪", fuel: "⛽", aerodrome: "✈️", ferry_terminal: "⛴️", bus_station: "🚌", station: "🚉",
+  place_of_worship: "⛪", parking: "🅿️", subway_entrance: "🚇", bus_stop: "🚏", fuel: "⛽", aerodrome: "✈️", ferry_terminal: "⛴️", bus_station: "🚌", station: "🚉",
   marina: "⛵", beach: "🏖️", golf_course: "⛳", zoo: "🦁",
 };
 
+// Parking lots aren't polygons in the tiles, only POI points ("Costco Parking"). A parking point inside a retail,
+// commercial or industrial area, and not inside a building (that would be a garage), makes that area a lot.
+const LOT_LANDUSE = new Set(["retail", "commercial", "industrial"]);
+export function parkingLots(L) {
+  const lots = new Set();
+  if (!L.landuse || !L.pois) return lots;
+  const pts = [];
+  for (let i = 0; i < L.pois.length; i++) {
+    const f = L.pois.feature(i);
+    if (f.type === 1 && f.properties.kind === "parking") { const p = f.loadGeometry()[0][0]; pts.push([p.x, p.y]); }
+  }
+  if (!pts.length) return lots;
+  const rings = (f) => f.loadGeometry().map((r) => r.map((q) => [q.x, q.y]));
+  const inBuilding = (p) => { for (let i = 0; i < (L.buildings?.length ?? 0); i++) { const f = L.buildings.feature(i); if (f.type === 3 && inPolygon(p[0], p[1], rings(f))) return true; } return false; };
+  const open = pts.filter((p) => !inBuilding(p));
+  for (let i = 0; i < L.landuse.length; i++) {
+    const f = L.landuse.feature(i);
+    if (f.type === 3 && LOT_LANDUSE.has(f.properties.kind) && open.some((p) => inPolygon(p[0], p[1], rings(f)))) lots.add(i);
+  }
+  return lots;
+}
 export const STYLE = {
   water: "#4fb3e8", shore: "#2f86c2", land: "#a8d672",
   landuse: {
@@ -24,7 +47,8 @@ export const STYLE = {
     scrub: "#9cc46b", meadow: "#a2d27a", farmland: "#c6dc8f", orchard: "#97cc6c", vineyard: "#a8c873",
     commercial: "#ead7b7", retail: "#ead7b7", industrial: "#d8cdc2", railway: "#d8cdc2", college: "#f1dcc8",
     school: "#f1dcc8", university: "#f1dcc8", hospital: "#f4d4d0", aerodrome: "#d9d9cc", pier: "#c9a27a",
-    bare_rock: "#bdb5a6", sand: "#f2e0a6", beach: "#f2e0a6", glacier: "#f4fbff", parking: "#d6d2cc",
+    bare_rock: "#bdb5a6", sand: "#f2e0a6", beach: "#f2e0a6", glacier: "#f4fbff", parking: "#8f939b", garages: "#b9b4ad",
+    pedestrian: "#e6dfd2", platform: "#cfcac2",
   },
   // metres wide, fill, casing (dark outline) or null
   road(p) {
@@ -37,7 +61,7 @@ export const STYLE = {
     return null;
   },
   river: { river: 12, canal: 8, stream: 3, ditch: 1.5, drain: 1.5 },
-  building: "#f2b880", buildingEdge: "#9a6440",
+  building: "#f2b880", buildingEdge: "#9a6440", median: "#8cc865",
 };
 
 // Land use draws in a fixed order by kind: features often tie on sort_rank (a provincial park over a forest), and a
@@ -45,14 +69,14 @@ export const STYLE = {
 const LANDUSE_ORDER = ["nature_reserve", "park", "national_park", "protected_area", "farmland", "meadow", "grass",
   "scrub", "wood", "forest", "orchard", "vineyard", "bare_rock", "glacier", "sand", "beach", "residential", "commercial",
   "retail", "industrial", "railway", "aerodrome", "college", "university", "school", "hospital", "cemetery",
-  "recreation_ground", "golf_course", "garden", "playground", "pitch", "parking", "pier"];
+  "recreation_ground", "golf_course", "garden", "playground", "pitch", "parking", "garages", "pedestrian", "platform", "pier"];
 const order = (f) => { const i = LANDUSE_ORDER.indexOf(f.properties.kind); return i === -1 ? LANDUSE_ORDER.length : i; };
 const rank = (f) => f.properties.sort_rank ?? 0;
 
 function features(layer, by = rank) {
   if (!layer) return [];
   const out = [];
-  for (let i = 0; i < layer.length; i++) out.push(layer.feature(i));
+  for (let i = 0; i < layer.length; i++) out.push(Object.assign(layer.feature(i), { _i: i })); // _i: index in its layer
   return out.sort((a, b) => by(a) - by(b) || rank(a) - rank(b));
 }
 
@@ -82,9 +106,22 @@ export function paintTile(ctx, vt, size, mPerPx, opts = {}) {
   ctx.clip("nonzero");
   paveDense(ctx, L.buildings, size, mPerPx);
   ctx.restore();
+  const lots = parkingLots(L);
   for (const f of features(L.landuse, order)) {
-    const c = f.type === 3 && STYLE.landuse[f.properties.kind];
+    if (f.type !== 3) continue;
+    const lot = lots.has(f._i), c = lot ? STYLE.landuse.parking : STYLE.landuse[f.properties.kind];
     if (c) { ctx.fillStyle = c; path(f); ctx.fill("nonzero"); }
+  }
+  // medians between dual carriageways: a planted strip (trees are added in 3D)
+  const oneways = [];
+  for (const f of features(L.roads)) {
+    if (f.type !== 2 || !f.properties.oneway || !f.properties.name || f.properties.kind === "highway" || f.properties.is_bridge || f.properties.is_tunnel) continue; // freeways: barriers, not planted
+    for (const line of f.loadGeometry()) for (let i = 1; i < line.length; i++)
+      oneways.push({ ax: line[i - 1].x, az: line[i - 1].y, bx: line[i].x, bz: line[i].y, name: f.properties.name });
+  }
+  ctx.fillStyle = STYLE.median;
+  for (const { quad } of medianQuads(oneways, mPerPx * s)) {
+    ctx.beginPath(); quad.forEach(([qx, qy], i) => (i ? ctx.lineTo(qx * s, qy * s) : ctx.moveTo(qx * s, qy * s))); ctx.fill();
   }
   for (const f of features(L.water)) {
     if (f.type === 3) {
