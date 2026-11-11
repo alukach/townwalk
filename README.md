@@ -4,7 +4,7 @@ Walk a cartoon version of a real town in the browser, streamed from open data on
 with HTTP range requests: only the tiles near the walker are fetched. Starting with Nelson, BC; any town by
 `?lat=…&lon=…`.
 
-**Play:** https://alukach.github.io/raea-townwalk/ · another town: `?lat=51.1784&lon=-115.5708` (Banff)
+**Play:** https://alukach.com/raea-townwalk/ · another town: `?lat=51.1784&lon=-115.5708` (Banff)
 
 ## Run locally
 
