@@ -6,8 +6,19 @@
   <title>Town Walk</title>
   <style>
     html, body { margin: 0; height: 100%; overflow: hidden; background: #a8d8ff; font: 13px/1.4 system-ui, sans-serif; }
-    #hud { position: fixed; left: 12px; top: 12px; padding: 8px 10px; border-radius: 8px; background: #fffd; color: #222; white-space: pre; }
-    #help { position: fixed; left: 12px; bottom: 12px; padding: 6px 10px; border-radius: 8px; background: #fffd; color: #222; }
+    canvas { display: block; }
+    .panel { position: fixed; padding: 8px 10px; border-radius: 8px; background: #fffd; color: #222; }
+    #hud { left: 12px; top: 12px; white-space: pre; }
+    #help { right: 12px; bottom: 12px; }
+    #minimap { position: fixed; left: 16px; bottom: 16px; width: 220px; height: 220px; border-radius: 50%;
+      border: 5px solid #23262e; box-shadow: 0 4px 14px #0006; background: #4fb3e8; }
+    #mapbtn { position: fixed; left: 196px; bottom: 196px; width: 40px; height: 40px; border-radius: 50%; border: 3px solid #23262e;
+      background: #ffd166; font: 800 15px system-ui; cursor: pointer; }
+    #map { position: fixed; inset: 0; background: #23262ecc; display: grid; grid-template-rows: auto 1fr; }
+    #map[hidden] { display: none; }
+    #map header { color: #fff; padding: 10px 16px; font-weight: 600; }
+    #bigmap { width: calc(100% - 32px); height: calc(100% - 16px); margin: 0 16px 16px; border: 5px solid #23262e;
+      border-radius: 14px; box-sizing: border-box; cursor: grab; touch-action: none; }
   </style>
   <script type="importmap">
     {
@@ -22,8 +33,14 @@
   </script>
 </head>
 <body>
-  <div id="hud">loading…</div>
-  <div id="help">WASD / arrows to walk · Shift to run · <code>?lat=…&amp;lon=…</code> for another town</div>
+  <div id="hud" class="panel">loading…</div>
+  <div id="help" class="panel">WASD / arrows to walk · Shift to run · M for the map</div>
+  <canvas id="minimap"></canvas>
+  <button id="mapbtn" title="Map (M)">M</button>
+  <div id="map" hidden>
+    <header>Drag to pan · scroll to zoom · double-click to jump there · M or Esc to close</header>
+    <canvas id="bigmap"></canvas>
+  </div>
   <script type="module" src="main.js"></script>
 </body>
 </html>

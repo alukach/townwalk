@@ -20,7 +20,7 @@ No build step: `index.html` loads three.js, pmtiles, vector-tile and pbf from js
 
 | Layer | Source | Tiles |
 |---|---|---|
-| Buildings (next: roads, water, land use) | Protomaps OSM basemap v4, `protomaps/openstreetmap/v4.pmtiles` | z15 MVT, ~16 KB, kept within 700 m |
+| Buildings, roads, water, land use | Protomaps OSM basemap v4, `protomaps/openstreetmap/v4.pmtiles` | z15 MVT, ~16 KB, kept within 700 m |
 | Elevation | NASADEM terrain-RGB, `smartmaps/gel/gel.pmtiles` | z12 WebP, ~80 KB, kept within 1.5 km |
 
 Why not Overture GeoParquet: the `fused/overture` row groups span ~6° of longitude, so the smallest range read
@@ -35,6 +35,14 @@ Each step is a commit you can check out.
 - [x] **2. Browser + terrain + streaming.** three.js; buildings and elevation streamed by range request around the
   walker; buildings seated on the slope; walker follows the ground; camera pulls in past walls.
   ![](docs/step2-aerial.png) ![](docs/step2-hill.png)
-- [ ] **3. Streets and water.** Road ribbons by kind, lake and river polygons, parks (all in the same z15 tiles).
-- [ ] **4. Cartoon look.** Toon shading and outlines, roofs, trees, colour by building kind.
+- [x] **3. Maps, streets, water, land use.**
+  - GTA-style minimap (turns with you) and full map (**M**): drag, scroll, **double-click to jump**. Far jumps
+    reload around the new spot.
+  - Roads, water and land use painted per z15 tile (`paint.js`, one style for ground and maps) onto a patch of
+    the terrain, so they follow the slope; lakes flattened to their lowest point; water blocks walking.
+  - Bridges are raised decks between their ends, walkable (and you can walk under them).
+  - Buildings like MapLibre's `fill-extrusion`: `min_height` to `height`, coloured lightgray → royalblue → lightblue
+    by height. On slopes, walls reach down to the lowest corner.
+  ![](docs/step3-bridge.png) ![](docs/step3-map.png)
+- [ ] **4. Cartoon look.** Toon shading and outlines, roofs, trees in woods and parks.
 - [ ] **5. Any town.** Place search, re-origin when far from start, terrain seams, loading by view direction.
