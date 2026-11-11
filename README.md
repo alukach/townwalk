@@ -63,4 +63,16 @@ Each step is a commit you can check out.
     map, 450 m of tiles, fewer trees).
   - Trees block walking (trunks; the boughs stay walk-through) and pull the camera in; woods 1.5x denser.
   ![](docs/step5-shadows.png) ![](docs/step5-mobile.png)
-- [ ] **6. Any town.** Place search, re-origin when far from start, terrain seams, loading by view direction.
+- [x] **6. Any town, and OSM-driven detail.**
+  - Place search (top): [Photon](https://photon.komoot.io) (OSM geocoder; only what you type is sent) or `lat, lon`.
+    Far jumps, and walking >4 km from the origin, re-centre the world in place (no reload); the URL follows you.
+  - Roads are drawn by the ground: each tile bakes a road distance field on the GPU (`roads.js`), and the ground
+    shader paints asphalt, kerbs, sidewalks, centre dashes and rails from it. Exact draping, sharp up close.
+    **`ROAD_STYLE` is the table that says how each OSM road kind looks** (widths, sidewalks, markings).
+  - Buildings styled by what's in/under them: shops (POI or commercial land) get shop windows + awnings, churches a
+    steeple, schools/hospitals brick, civic buildings stone, industry metal; tall buildings get window bands.
+  - Street furniture from OSM points (lamps, benches, picnic tables, signals, stop signs, bins, bike racks, post
+    boxes, fountains), solid like trunks. Named POIs float as labels (icon + name) over their roof.
+  - Current street and area, GTA-style, top right; a title card when you enter a new area. Street names and POI
+    icons on the maps. Terrain tiles have skirts so seams don't show sky. Soft shadows.
+  ![](docs/step6-banff.png) ![](docs/step6-downtown.png) ![](docs/step6-roads.png) Place search, re-origin when far from start, terrain seams, loading by view direction.

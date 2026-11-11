@@ -134,7 +134,7 @@ function drawLabels(ctx, L, s, size) {
     ctx.fillStyle = "#3b3b45"; ctx.fillText(name, 0, 0);
     ctx.restore();
   }
-  ctx.font = `${fs * 0.75}px system-ui, sans-serif`; // the minimap shows z15 tiles ~2.6x up
+  ctx.font = `${fs * 0.5}px system-ui, sans-serif`; // emoji draw large, and the minimap shows z15 tiles ~2.6x up
   for (const f of features(L.pois)) {
     const icon = f.type === 1 && f.properties.name && POI_ICON[f.properties.kind];
     if (!icon) continue;

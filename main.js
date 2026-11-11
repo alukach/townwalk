@@ -5,11 +5,14 @@ import { paintTile, tileMPerPx, STYLE } from "./paint.js";
 import { setupMaps } from "./map.js";
 import { bakeRoads, groundMaterial, roadStyleId, ROAD_STYLE } from "./roads.js";
 import * as geo from "./geo.js";
+import { setupLabels, POI_ICON } from "./labels.js";
+import { setupSearch } from "./search.js";
 
 // ---- where -----------------------------------------------------------------------------------------------------
 const q = new URLSearchParams(location.search);
 const START = [+(q.get("lon") ?? -117.2913), +(q.get("lat") ?? 49.4936)]; // default: Baker St, Nelson BC
-const frame = geo.localFrame(...START);
+let frame = geo.localFrame(...START); // re-made by reorigin() when you jump or walk far
+let gen = 0; // bumped by reorigin(); loads that started under an older frame are thrown away
 const BUILD_Z = 15, DEM_Z = 12; // z15 vector tiles (~0.8 km here), z12 elevation (~6 km, 512 px)
 // Phones and tablets get a lighter profile: less GPU memory, fewer pixels, a smaller world around you.
 const MOBILE = matchMedia("(pointer: coarse)").matches || q.has("mobile");
@@ -53,7 +56,7 @@ const buildingMat = toon({ vertexColors: true, polygonOffset: true, polygonOffse
 buildingMat.shadowSide = THREE.BackSide; // closed solids: back faces in the shadow map, so lit walls don't self-shadow (acne)
 const inkMat = new THREE.LineBasicMaterial({ color: 0x2d2a32 });
 const bridgeMat = toon({ vertexColors: true });
-const terrainMat = toon({ vertexColors: true });
+const terrainMat = toon({ vertexColors: true, side: THREE.DoubleSide }); // double: skirts face either way
 const treeMat = toon({ vertexColors: true });
 const playerGeo = new THREE.CapsuleGeometry(0.35, 1.1, 4, 12);
 const player = new THREE.Mesh(playerGeo, toon({ color: 0xe4572e }));
@@ -69,6 +72,7 @@ const demTiles = new Map(); // "x/y" -> Promise<{grid, mesh}|null>
 const demReady = new Map(); // "x/y" -> grid, for synchronous height lookups
 
 async function loadDem(x, y) {
+  const myGen = gen;
   const t = await dem.getZxy(DEM_Z, x, y);
   if (!t) return null;
   const bmp = await createImageBitmap(new Blob([t.data]), { colorSpaceConversion: "none", premultiplyAlpha: "none" });
@@ -80,7 +84,8 @@ async function loadDem(x, y) {
   for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) grid[j * N + i] = h(Math.round((i / (N - 1)) * (W - 1)), Math.round((j / (N - 1)) * (W - 1)));
   base ??= grid[(N >> 1) * N + (N >> 1)];
 
-  const pos = new Float32Array(N * N * 3), col = new Float32Array(N * N * 3), c = new THREE.Color();
+  const S = 4 * (N - 1); // skirt verts: one under each edge vertex
+  const pos = new Float32Array((N * N + S) * 3), col = new Float32Array((N * N + S) * 3), c = new THREE.Color();
   for (let j = 0; j < N; j++) {
     const lat = geo.tileYToLat(y + j / (N - 1), DEM_Z);
     for (let i = 0; i < N; i++) {
@@ -94,11 +99,25 @@ async function loadDem(x, y) {
   }
   const idx = [];
   for (let j = 0; j < N - 1; j++) for (let i = 0; i < N - 1; i++) { const a = j * N + i; idx.push(a, a + N, a + 1, a + 1, a + N, a + N + 1); }
+  // skirts: a 40 m curtain down every edge, so seams between tiles (which sample different pixels) never show sky
+  const ring = [];
+  for (let i = 0; i < N - 1; i++) ring.push(i); // north edge, west to east
+  for (let j = 0; j < N - 1; j++) ring.push(j * N + N - 1); // east, north to south
+  for (let i = N - 1; i > 0; i--) ring.push((N - 1) * N + i); // south, east to west
+  for (let j = N - 1; j > 0; j--) ring.push(j * N); // west, south to north
+  ring.forEach((e, k) => {
+    const s = N * N + k;
+    pos.set([pos[e * 3], pos[e * 3 + 1] - 40, pos[e * 3 + 2]], s * 3);
+    col.set([col[e * 3], col[e * 3 + 1], col[e * 3 + 2]], s * 3);
+    const e2 = ring[(k + 1) % ring.length], s2 = N * N + ((k + 1) % ring.length);
+    idx.push(e, s, e2, e2, s, s2);
+  });
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
   g.setAttribute("color", new THREE.BufferAttribute(col, 3));
   g.setIndex(idx);
   g.computeVertexNormals();
+  if (myGen !== gen) { g.dispose(); return null; } // the world was re-centred meanwhile
   const mesh = new THREE.Mesh(g, terrainMat);
   mesh.receiveShadow = true;
   scene.add(mesh);
@@ -139,16 +158,51 @@ function rampColor(h, out) {
   const [s0, c0] = RAMP[i - 1], [s1, c1] = RAMP[i];
   return out.copy(c0).lerp(c1, (h - s0) / (s1 - s0));
 }
-// Cartoon buildings: pastel walls that drift into MapLibre's height ramp as buildings get taller; faces that look up
-// are roof, in a roof colour (pitched) or a flat-roof grey.
-const WALLS = ["#f6e7c8", "#f3d6c1", "#e9eef2", "#f7f1e3", "#e8dcc8", "#dfe8d8"].map((h) => new THREE.Color(h));
-const ROOFS = ["#c8553d", "#b5483a", "#6c757d", "#4a6fa5", "#7a9e7e", "#8d5a3b"].map((h) => new THREE.Color(h));
-const FLAT_ROOF = new THREE.Color("#b8b2a7");
-function paintBuilding(g, height, pitched, hash) {
-  const wall = WALLS[hash % WALLS.length].clone().lerp(rampColor(height, new THREE.Color()), Math.min(1, Math.max(0, (height - 10) / 60)));
-  const roof = pitched ? ROOFS[(hash >>> 8) % ROOFS.length] : FLAT_ROOF;
-  const n = g.attributes.normal, a = new Float32Array(n.count * 3);
-  for (let k = 0; k < n.count; k++) { const col = n.getY(k) > 0.25 ? roof : wall; a.set([col.r, col.g, col.b], k * 3); }
+// Cartoon buildings, styled by what OSM says is in or under them (POIs inside the footprint, land use beneath):
+// houses in pastels with pitched roofs; shops with an awning band on the ground floor; churches white with a steeple;
+// schools/hospitals brick; civic buildings stone; industry metal. Taller buildings get window bands and drift into
+// MapLibre's height ramp. Colour is per triangle (the extrusion is non-indexed), so bands have hard edges.
+const C = (h) => new THREE.Color(h);
+const WALLS = ["#f6e7c8", "#f3d6c1", "#e9eef2", "#f7f1e3", "#e8dcc8", "#dfe8d8"].map(C);
+const ROOFS = ["#c8553d", "#b5483a", "#6c757d", "#4a6fa5", "#7a9e7e", "#8d5a3b"].map(C);
+const AWNINGS = ["#e4572e", "#2e86ab", "#3bb273", "#f2a541", "#8e5ea2", "#d64161"].map(C);
+const STYLES = {
+  house: { walls: WALLS, roof: null },
+  shop: { walls: ["#fff3d6", "#fde2e4", "#e2f0cb", "#dbe7f4"].map(C), roof: C("#b8b2a7"), awning: true },
+  church: { walls: [C("#f4efe6")], roof: C("#4a4e69"), steeple: true },
+  brick: { walls: ["#c8674a", "#b85c42"].map(C), roof: C("#7d6e63") },
+  civic: { walls: [C("#e6dcc4")], roof: C("#6b7a8f") },
+  industrial: { walls: ["#9fb0bf", "#aab3a8"].map(C), roof: C("#7f8c96") },
+};
+const GLASS = C("#9fc3d9"), FLAT_ROOF = C("#b8b2a7");
+const SHOP_POI = new Set(["restaurant", "cafe", "fast_food", "bar", "pub", "bakery", "ice_cream", "supermarket", "convenience", "clothes", "books", "hardware", "bicycle", "florist", "bank", "pharmacy", "hotel", "motel", "hostel", "post_office", "cinema", "theatre", "marketplace"]);
+const CIVIC_POI = new Set(["townhall", "courthouse", "library", "museum", "arts_centre", "community_centre"]);
+const BRICK_POI = new Set(["school", "college", "university", "hospital", "kindergarten", "clinic", "fire_station", "police"]);
+function buildingStyle(kinds, landuse) {
+  const has = (set) => kinds.some((k) => set.has(k));
+  if (kinds.includes("place_of_worship")) return "church";
+  if (has(CIVIC_POI)) return "civic";
+  if (has(BRICK_POI) || ["school", "college", "university", "hospital"].includes(landuse)) return "brick";
+  if (has(SHOP_POI) || landuse === "commercial" || landuse === "retail") return "shop";
+  if (landuse === "industrial" || landuse === "railway") return "industrial";
+  return "house";
+}
+// o: {height, pitched, hash, style, y0 (geometry y of the base), row (metres per extrusion step, ~1.6 = half a storey)}
+function paintBuilding(g, o) {
+  const st = STYLES[o.style], wall = st.walls[o.hash % st.walls.length].clone();
+  wall.lerp(rampColor(o.height, new THREE.Color()), Math.min(1, Math.max(0, (o.height - 10) / 60)));
+  const roof = o.pitched ? st.roof ?? ROOFS[(o.hash >>> 8) % ROOFS.length] : st.roof ?? FLAT_ROOF;
+  const awning = AWNINGS[(o.hash >>> 4) % AWNINGS.length], windows = o.height >= 10 && o.style !== "church";
+  const P = g.attributes.position, n = g.attributes.normal, a = new Float32Array(P.count * 3);
+  for (let t = 0; t < P.count; t += 3) {
+    const ny = (n.getY(t) + n.getY(t + 1) + n.getY(t + 2)) / 3, cy = (P.getY(t) + P.getY(t + 1) + P.getY(t + 2)) / 3 - o.y0;
+    const r = Math.floor(cy / o.row); // half-storey row: even = wall, odd = window height
+    const col = ny > 0.25 ? roof
+      : st.awning && r === 0 ? GLASS // shop window
+      : st.awning && r === 1 ? awning // awning over it
+      : windows && r >= 1 && r % 2 === 1 ? GLASS : wall;
+    for (let k = 0; k < 3; k++) a.set([col.r, col.g, col.b], (t + k) * 3);
+  }
   g.setAttribute("color", new THREE.BufferAttribute(a, 3));
   return g;
 }
@@ -175,9 +229,33 @@ const TREE = (() => {
     part(new THREE.ConeGeometry(1.5, 3.2, 7), "#4fa457", 5.8),
   ]);
 })();
+// Street furniture from OSM POI points: one small coloured model per kind, drawn instanced per tile.
+const PROP = (() => {
+  const part = (g, hex, x = 0, y = 0, z = 0) => tint(g.translate(x, y, z), new THREE.Color(hex));
+  const Box = (w, h, d) => new THREE.BoxGeometry(w, h, d), Cyl = (r1, r2, h, s = 8) => new THREE.CylinderGeometry(r1, r2, h, s);
+  const Ball = (r) => new THREE.SphereGeometry(r, 8, 6);
+  const merge = (...parts) => mergeGeometries(parts);
+  return {
+    street_lamp: merge(part(Cyl(0.07, 0.1, 4.2, 6), "#3d4a3d", 0, 2.1), part(Ball(0.28), "#ffe08a", 0, 4.3)),
+    bench: merge(part(Box(1.6, 0.08, 0.45), "#a0673a", 0, 0.45), part(Box(1.6, 0.4, 0.06), "#a0673a", 0, 0.75, -0.2),
+      part(Box(0.08, 0.45, 0.4), "#3d3d3d", -0.7, 0.22), part(Box(0.08, 0.45, 0.4), "#3d3d3d", 0.7, 0.22)),
+    picnic_table: merge(part(Box(1.8, 0.06, 0.8), "#b07a45", 0, 0.75), part(Box(1.8, 0.05, 0.3), "#b07a45", 0, 0.45, 0.6),
+      part(Box(1.8, 0.05, 0.3), "#b07a45", 0, 0.45, -0.6), part(Box(0.08, 0.75, 1.5), "#8a5a32", 0, 0.37)),
+    traffic_signals: merge(part(Cyl(0.08, 0.08, 3.2, 6), "#3d3d3d", 0, 1.6), part(Box(0.35, 0.95, 0.3), "#2b2b2b", 0, 3.3),
+      part(Ball(0.1), "#e63946", 0, 3.62, 0.16), part(Ball(0.1), "#f4a261", 0, 3.3, 0.16), part(Ball(0.1), "#2a9d8f", 0, 2.98, 0.16)),
+    stop: merge(part(Cyl(0.04, 0.04, 2.2, 6), "#8a8a8a", 0, 1.1), part(Cyl(0.38, 0.38, 0.04, 8).rotateX(Math.PI / 2), "#d62828", 0, 2.3, 0.03)),
+    waste_basket: part(Cyl(0.25, 0.22, 0.8, 8), "#3a6b4a", 0, 0.4),
+    bicycle_parking: merge(part(Box(1.6, 0.06, 0.06), "#8a8a8a", 0, 0.8), part(Box(0.06, 0.8, 0.06), "#8a8a8a", -0.75, 0.4), part(Box(0.06, 0.8, 0.06), "#8a8a8a", 0.75, 0.4)),
+    post_box: merge(part(Box(0.5, 1.1, 0.45), "#c1121f", 0, 0.55), part(Box(0.52, 0.08, 0.47), "#780000", 0, 1.1)),
+    drinking_water: merge(part(Cyl(0.15, 0.2, 0.9, 8), "#6c757d", 0, 0.45), part(Ball(0.12), "#4fb3e8", 0, 0.95)),
+  };
+})();
+const PROP_RADIUS = { street_lamp: 0.25, bench: 0.6, picnic_table: 1, traffic_signals: 0.25, stop: 0.2, waste_basket: 0.3, post_box: 0.35, drinking_water: 0.25 };
+
 const MASK_PX = 512; // ~1.6 m per pixel
 const TREE_SPACING = 7.3, TREE_MAX = PROFILE.treeMax; // metres between grid cells (woods 1.5x the old 9 m grid); cap per tile
 const hexKey = (h) => parseInt(h.slice(1), 16);
+const LANDUSE_BY_COLOUR = new Map(Object.entries(STYLE.landuse).map(([k, h]) => [hexKey(h), k])); // first kind per colour
 const TREE_DENSITY = { // painted ground colour -> chance of a tree per grid cell
   [hexKey(STYLE.landuse.wood)]: 0.9, [hexKey(STYLE.landuse.nature_reserve)]: 0.7, // denser grid -> 1.5x trees
   [hexKey(STYLE.landuse.park)]: 0.12, [hexKey(STYLE.landuse.scrub)]: 0.1, [hexKey(STYLE.landuse.cemetery)]: 0.067, // unchanged per m²
@@ -189,6 +267,7 @@ const tiles = new Map(); // "x/y" -> Promise<tile|null>
 const ready = new Map(); // "x/y" -> {foots, water, bridges}, for synchronous collision
 
 async function loadTile(x, y) {
+  const myGen = gen;
   const d = await demTile(x >> 3, y >> 3); // the z12 tile this z15 tile sits in
   const vt = await getVT(BUILD_Z, x, y);
   if (!vt || !d) return null;
@@ -245,6 +324,26 @@ async function loadTile(x, y) {
   paintTile(mask, vt, MASK_PX, tileMPerPx(BUILD_Z, geo.tileYToLat(y + 0.5, BUILD_Z), MASK_PX));
   const groundPx = mask.getImageData(0, 0, MASK_PX, MASK_PX).data;
 
+  // POIs: named ones become labels (and style the building they're in); street furniture becomes props
+  const named = [], props = {}, places = [];
+  for (const f of layerFeatures("pois")) {
+    if (f.type !== 1) continue;
+    const p = f.loadGeometry()[0][0], [lx, lz] = fromTile(p.x * (E / f.extent), p.y * (E / f.extent)), k = f.properties.kind;
+    if (PROP[k]) (props[k] ??= []).push([lx, lz]);
+    else if (f.properties.name) named.push({ x: lx, z: lz, kind: k, name: f.properties.name, icon: POI_ICON[k] ?? "📍", key: `${x}/${y}/${f.id ?? named.length}` });
+  }
+  for (const f of layerFeatures("places")) {
+    if (f.type !== 1 || !f.properties.name) continue;
+    const p = f.loadGeometry()[0][0], [lx, lz] = fromTile(p.x * (E / f.extent), p.y * (E / f.extent));
+    places.push({ x: lx, z: lz, name: f.properties.name, kind: f.properties.kind });
+  }
+  const landuseAt = (lx, lz) => { // land use under a local point, read back from the tree mask's colours
+    const [lon, lat] = frame.toLonLat(lx, lz);
+    const px = Math.min(MASK_PX - 1, Math.max(0, ((geo.lonToTileX(lon, BUILD_Z) - x) * MASK_PX) | 0)), py = Math.min(MASK_PX - 1, Math.max(0, ((geo.latToTileY(lat, BUILD_Z) - y) * MASK_PX) | 0));
+    const o = (py * MASK_PX + px) * 4;
+    return LANDUSE_BY_COLOUR.get((groundPx[o] << 16) | (groundPx[o + 1] << 8) | groundPx[o + 2]);
+  };
+
   // buildings
   const geoms = [], foots = [], c = new THREE.Color();
   layerFeatures("buildings").forEach((f, i) => {
@@ -271,13 +370,25 @@ async function loadTile(x, y) {
       const area = Math.abs(geo.ringArea(outer)), perim = outer.reduce((s, p, k) => s + Math.hypot(p[0] - outer[(k + 1) % outer.length][0], p[1] - outer[(k + 1) % outer.length][1]), 0);
       const pitched = !minH && !holes.length && area < 450 && height < 16;
       const roofH = Math.min(3.5, Math.max(1.2, Math.sqrt(area) * 0.18)), inset = Math.min(roofH, ((2 * area) / perim) * 0.85);
+      const b = bounds([outer]), inside = named.filter((p) => within(p.x, p.z, b) && geo.pointInRing(p.x, p.z, outer));
+      const cx = outer.reduce((s, p) => s + p[0], 0) / outer.length, cz = outer.reduce((s, p) => s + p[1], 0) / outer.length;
+      const style = buildingStyle(inside.map((p) => p.kind), landuseAt(cx, cz));
+      const depth = top - bottom, steps = Math.max(1, Math.round(depth / 1.6)); // ~1.6 m bands: awnings, windows
       const g = new THREE.ExtrudeGeometry(shape, pitched
-        ? { depth: top - bottom, bevelEnabled: true, bevelThickness: roofH, bevelSize: inset, bevelOffset: -inset, bevelSegments: 1 }
-        : { depth: top - bottom, bevelEnabled: false });
+        ? { depth, steps, bevelEnabled: true, bevelThickness: roofH, bevelSize: inset, bevelOffset: -inset, bevelSegments: 1 }
+        : { depth, steps, bevelEnabled: false });
       // extrude along +z, stand up: (sx, sy, d) -> (sx, d, -sy) = (x, up, z)
       g.rotateX(-Math.PI / 2).translate(0, bottom - base, 0);
-      geoms.push(paintBuilding(g, height, pitched, (i * 2654435761 + x * 31 + y * 17) >>> 0));
-      if (minH < 2) foots.push({ ring: outer, ...bounds([outer]) }); // raised parts don't block the street
+      const hash = (i * 2654435761 + x * 31 + y * 17) >>> 0;
+      geoms.push(paintBuilding(g, { height, pitched, hash, style, y0: bottom - base, row: depth / steps }));
+      if (STYLES[style].steeple) { // a spire on the roof
+        const spire = new THREE.ConeGeometry(Math.min(2.2, Math.sqrt(area) * 0.12), Math.max(7, height * 0.9), 6).toNonIndexed();
+        spire.translate(cx, top - base + (pitched ? roofH : 0) + Math.max(7, height * 0.9) / 2 - 0.3, cz);
+        geoms.push(tint(spire, STYLES.church.roof));
+      }
+      const roofTop = top + (pitched ? roofH : 0);
+      for (const p of inside) p.y = roofTop - base + 2.5; // labels float over the roof
+      if (minH < 2) foots.push({ ring: outer, ...b }); // raised parts don't block the street
     }
   });
   if (geoms.length) {
@@ -312,6 +423,21 @@ async function loadTile(x, y) {
   }
   if (decks.length) { objects.push(Object.assign(new THREE.Mesh(mergeGeometries(decks), bridgeMat), { castShadow: true, receiveShadow: true })); decks.forEach((g) => g.dispose()); }
 
+  // labels outside buildings float a little over the ground; props stand on it (and block like trees do)
+  for (const p of named) p.y ??= groundAt(p.x, p.z) - base + 3;
+  const propCells = new Map();
+  for (const [kind, spots] of Object.entries(props)) {
+    const inst = new THREE.InstancedMesh(PROP[kind], treeMat, spots.length), mm = new THREE.Matrix4();
+    spots.forEach(([px, pz], k) => {
+      const gy = groundAt(px, pz), yaw = ((((px * 73856093) ^ (pz * 19349663)) >>> 0) % 628) / 100;
+      inst.setMatrixAt(k, mm.makeRotationY(yaw).setPosition(px, (Number.isFinite(gy) ? gy : base) - base, pz));
+      const r = PROP_RADIUS[kind];
+      if (r) { const cell = `${Math.floor(px / 8)},${Math.floor(pz / 8)}`; (propCells.get(cell) ?? propCells.set(cell, []).get(cell)).push([px, pz, r]); }
+    });
+    inst.castShadow = inst.receiveShadow = true;
+    objects.push(inst);
+  }
+
   // trees: a jittered grid, kept only where the painted ground is wood or park (so never on roads or water)
   const mpp = tileMPerPx(BUILD_Z, geo.tileYToLat(y + 0.5, BUILD_Z), MASK_PX), stepPx = TREE_SPACING / mpp, m = new THREE.Matrix4();
   const spots = [], treeCells = new Map(); // "cx,cz" (8 m cells) -> [[x, z, trunk radius]]
@@ -338,8 +464,10 @@ async function loadTile(x, y) {
     objects.push(trees);
   }
 
+  for (const [cell, list] of propCells) (treeCells.get(cell) ?? treeCells.set(cell, []).get(cell)).push(...list); // props collide like trunks
+  if (myGen !== gen) { disposeObjects(objects); return null; } // the world was re-centred meanwhile
   objects.forEach((o) => scene.add(o));
-  return { objects, foots, water, bridges, treeCells, streets };
+  return { objects, foots, water, bridges, treeCells, streets, named, places };
 }
 
 // ---- collision ---------------------------------------------------------------------------------------------------
@@ -380,21 +508,33 @@ function stream() {
     tiles.set(k, loadTile(x, y).then((t) => { if (t && tiles.has(k)) ready.set(k, t); return t; }));
   }
   const keep = near(BUILD_Z, BUILD_R * 1.5);
-  for (const [k, p] of tiles) if (!keep.has(k)) {
-    tiles.delete(k); ready.delete(k);
-    p.then((t) => t?.objects.forEach((o) => {
-      scene.remove(o);
-      if (o.isInstancedMesh) o.dispose(); else o.geometry.dispose(); // trees share one geometry
-      if (o.material.map) { o.material.map.dispose(); o.material.dispose(); }
-      if (o.material.userData.roadTex) o.material.userData.roadTex.userData.rt.dispose();
-    }));
-  }
+  for (const k of tiles.keys()) if (!keep.has(k)) dropTile(k);
   const keepDem = near(DEM_Z, DEM_R);
   for (const k of keepDem) if (!demTiles.has(k)) demTile(...k.split("/").map(Number));
-  for (const [k, p] of demTiles) if (!keepDem.has(k)) {
-    demTiles.delete(k); demReady.delete(k);
-    p.then((d) => { if (d) { scene.remove(d.mesh); d.mesh.geometry.dispose(); } });
+  for (const k of demTiles.keys()) if (!keepDem.has(k)) dropDem(k);
+}
+function disposeObjects(objects) {
+  for (const o of objects) {
+    scene.remove(o);
+    if (o.isInstancedMesh) o.dispose(); else o.geometry.dispose(); // trees and props share their geometry
+    if (o.material.map) { o.material.map.dispose(); o.material.dispose(); }
+    if (o.material.userData.roadTex) o.material.userData.roadTex.userData.rt.dispose();
   }
+}
+function dropTile(k) { const p = tiles.get(k); tiles.delete(k); ready.delete(k); p.then((t) => t && disposeObjects(t.objects)); }
+function dropDem(k) { const p = demTiles.get(k); demTiles.delete(k); demReady.delete(k); p.then((d) => { if (d) { scene.remove(d.mesh); d.mesh.geometry.dispose(); } }); }
+
+// Re-centre the world on lon/lat: a new local frame, everything rebuilt around it (decoded tiles stay cached, so
+// this is quick). Used for far jumps, and when walking far enough that the flat-earth frame would start to drift.
+function reorigin(lon, lat) {
+  gen++;
+  [...tiles.keys()].forEach(dropTile);
+  [...demTiles.keys()].forEach(dropDem);
+  frame = geo.localFrame(lon, lat); base = null;
+  Object.assign(walker, { x: 0, z: 0, y: NaN }); placed = false; camPos.set(0, 0, 0);
+  const p = new URLSearchParams(location.search);
+  p.set("lat", lat.toFixed(5)); p.set("lon", lon.toFixed(5));
+  history.replaceState(null, "", `?${p}`); // the URL is always a link back to here
 }
 
 // ---- walking -----------------------------------------------------------------------------------------------------
@@ -467,11 +607,41 @@ function step(dt) {
   if (!v) walker.y = standAt(walker.x, walker.z) || walker.y;
 }
 
+const FAR = 4000; // metres from the frame's origin before we re-centre (flat-earth error stays well under 1 m)
 function teleport(lon, lat) {
   const [x, z] = frame.toLocal(lon, lat);
-  // ponytail: far jumps reload around the new spot (the local frame is flat-earth, good to ~10 km)
-  if (Math.hypot(x, z) > 8000) { location.search = `?lat=${lat.toFixed(5)}&lon=${lon.toFixed(5)}`; return; }
+  if (Math.hypot(x, z) > FAR) return reorigin(lon, lat);
   Object.assign(walker, { x, z, y: NaN }); placed = false; camPos.set(0, 0, 0);
+}
+
+// Where am I: the nearest named street (within 25 m) from loaded tiles, and the area from the z12 tiles' places
+// (a neighbourhood within ~1.5 km, else the nearest town within ~10 km).
+function streetAt(x, z) {
+  let best = null, bd = 25;
+  for (const t of ready.values())
+    for (const s of t.streets) {
+      const dx = s.bx - s.ax, dz = s.bz - s.az, l2 = dx * dx + dz * dz || 1;
+      const k = Math.max(0, Math.min(1, ((x - s.ax) * dx + (z - s.az) * dz) / l2)), d = Math.hypot(x - s.ax - k * dx, z - s.az - k * dz);
+      if (d < bd) { bd = d; best = s; }
+    }
+  return best;
+}
+let area = null;
+async function findArea() {
+  const [lon, lat] = frame.toLonLat(walker.x, walker.z), tx = Math.floor(geo.lonToTileX(lon, 12)), ty = Math.floor(geo.latToTileY(lat, 12));
+  let hood = null, town = null;
+  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+    const vt = await getVT(12, tx + dx, ty + dy), L = vt?.layers.places;
+    for (let i = 0; i < (L?.length ?? 0); i++) {
+      const f = L.feature(i), p = f.loadGeometry()[0][0], name = f.properties.name, kind = f.properties.kind;
+      if (!name) continue;
+      const [x, z] = frame.toLocal(geo.tileXToLon(tx + dx + p.x / L.extent, 12), geo.tileYToLat(ty + dy + p.y / L.extent, 12));
+      const d = Math.hypot(x - walker.x, z - walker.z);
+      if (kind === "neighbourhood" && d < 1500 && (!hood || d < hood.d)) hood = { name, d };
+      if (kind === "locality" && d < 10000 && (!town || d < town.d)) town = { name, d };
+    }
+  }
+  area = hood && town ? { name: `${hood.name}, ${town.name}` } : hood ?? town;
 }
 
 // ---- loop --------------------------------------------------------------------------------------------------------
@@ -479,10 +649,13 @@ const hud = document.getElementById("hud");
 const ray = new THREE.Raycaster();
 const camPos = new THREE.Vector3(), camGoal = new THREE.Vector3(), look = new THREE.Vector3();
 const maps = setupMaps({ player: () => { const [lon, lat] = frame.toLonLat(walker.x, walker.z); return { lon, lat, yaw: walker.yaw }; }, teleport });
-let last = performance.now(), lastStream = 0;
+const labels = setupLabels(camera);
+setupSearch(teleport);
+let last = performance.now(), lastStream = 0, lastWhere = 0;
 renderer.setAnimationLoop((now) => {
   const dt = Math.min(0.1, (now - last) / 1000); last = now;
   if (now - lastStream > 500) { stream(); lastStream = now; }
+  if (Math.hypot(walker.x, walker.z) > FAR) reorigin(...frame.toLonLat(walker.x, walker.z)); // keep yaw, rebuild around
   if (!maps.open) step(dt);
   if (!Number.isFinite(walker.y)) walker.y = groundAt(walker.x, walker.z);
   const py = Number.isFinite(walker.y) ? walker.y - base : 0;
@@ -505,6 +678,8 @@ renderer.setAnimationLoop((now) => {
   sun.position.copy(sun.target.position).addScaledVector(SUN_DIR, 700);
   renderer.render(scene, camera);
   maps.draw();
+  labels.update([...ready.values()].flatMap((t) => t.named), walker);
+  if (now - lastWhere > 400) { lastWhere = now; labels.where(streetAt(walker.x, walker.z), area); findArea(); }
   const [lon, lat] = frame.toLonLat(walker.x, walker.z);
   hud.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)} · ${Number.isFinite(walker.y) ? Math.round(walker.y) + " m" : "loading…"}
 ${ready.size} tiles, ${demReady.size} terrain · ${stats.requests} range requests, ${(stats.bytes / 1024).toFixed(0)} KB`;

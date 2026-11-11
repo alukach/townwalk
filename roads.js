@@ -53,7 +53,8 @@ const bakeMat = new THREE.ShaderMaterial({
       if (sd > ${RANGE.toFixed(1)}) discard;
       float n = (sd + ${RANGE.toFixed(1)}) / ${(2 * RANGE).toFixed(1)};
       gl_FragDepth = n; // the depth test keeps the smallest signed distance: the union of all roads
-      gl_FragColor = vec4(1.0 - n, vInfo.y, mod(vInfo.z + h * length(ba), 15.0), cd); // stored flipped: an all-zero texel means "no road"
+      float side = ba.x * pa.y - ba.y * pa.x < 0.0 ? -1.0 : 1.0; // signed, so it stays linear across the centre line
+      gl_FragColor = vec4(1.0 - n, vInfo.y, mod(vInfo.z + h * length(ba), 15.0), cd * side); // .r flipped: all-zero texel = no road
     }`,
   depthTest: true, depthWrite: true,
 });
@@ -115,7 +116,7 @@ export function groundMaterial(gradientMap, map, roadTex) {
           int id = int(r.g + 0.5);
           if (id > 0 && sd < ${RANGE.toFixed(1)} - 0.5) {
             vec4 P = uParam[id];
-            float aa = fwidth(sd) * 0.8 + 0.01, cd = r.a, ac = fwidth(cd) * 0.8 + 0.01;
+            float aa = fwidth(sd) * 0.8 + 0.01, cd = abs(r.a), ac = fwidth(r.a) * 0.8 + 0.01; // .a: signed distance from the centre line
             vec3 col = diffuseColor.rgb;
             if (P.x > 0.0) col = mix(col, uSidewalk, 1.0 - smoothstep(P.x - aa, P.x + aa, sd));          // sidewalk
             if (P.w > 0.5) col = mix(col, uAsphalt[id], 1.0 - smoothstep(-aa, aa, sd));                // surface
