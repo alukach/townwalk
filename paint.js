@@ -1,3 +1,5 @@
+// MVT rings wind clockwise (outer) / counter-clockwise (holes), so fills use nonzero: evenodd cancels where
+// clipped rings overlap (whole-tile squares), which punched tile-shaped holes in woods.
 // One cartoon style for OSM vector tiles, painted to a canvas: the 3D ground texture, the minimap and the full map.
 
 export const STYLE = {
@@ -24,13 +26,20 @@ export const STYLE = {
   building: "#f2b880", buildingEdge: "#9a6440",
 };
 
+// Land use draws in a fixed order by kind: features often tie on sort_rank (a provincial park over a forest), and a
+// tie broken differently per tile showed as tile-shaped patches. Big protected areas first, small things last.
+const LANDUSE_ORDER = ["nature_reserve", "park", "national_park", "protected_area", "farmland", "meadow", "grass",
+  "scrub", "wood", "forest", "orchard", "vineyard", "bare_rock", "glacier", "sand", "beach", "residential", "commercial",
+  "retail", "industrial", "railway", "aerodrome", "college", "university", "school", "hospital", "cemetery",
+  "recreation_ground", "golf_course", "garden", "playground", "pitch", "parking", "pier"];
+const order = (f) => { const i = LANDUSE_ORDER.indexOf(f.properties.kind); return i === -1 ? LANDUSE_ORDER.length : i; };
 const rank = (f) => f.properties.sort_rank ?? 0;
 
-function features(layer) {
+function features(layer, by = rank) {
   if (!layer) return [];
   const out = [];
   for (let i = 0; i < layer.length; i++) out.push(layer.feature(i));
-  return out.sort((a, b) => rank(a) - rank(b));
+  return out.sort((a, b) => by(a) - by(b) || rank(a) - rank(b));
 }
 
 // Paint tile `vt` into ctx's [0, size] square. mPerPx: metres per canvas pixel (sets line widths).
@@ -50,14 +59,14 @@ export function paintTile(ctx, vt, size, mPerPx, opts = {}) {
   // water is the background; earth is land on top (so coasts work); then land use, water, roads, buildings
   ctx.fillStyle = STYLE.water; ctx.fillRect(0, 0, size, size);
   ctx.fillStyle = STYLE.land;
-  for (const f of features(L.earth)) if (f.type === 3) { path(f); ctx.fill("evenodd"); }
-  for (const f of features(L.landuse)) {
+  for (const f of features(L.earth)) if (f.type === 3) { path(f); ctx.fill("nonzero"); }
+  for (const f of features(L.landuse, order)) {
     const c = f.type === 3 && STYLE.landuse[f.properties.kind];
-    if (c) { ctx.fillStyle = c; path(f); ctx.fill("evenodd"); }
+    if (c) { ctx.fillStyle = c; path(f); ctx.fill("nonzero"); }
   }
   for (const f of features(L.water)) {
     if (f.type === 3) {
-      path(f); ctx.fillStyle = STYLE.water; ctx.fill("evenodd");
+      path(f); ctx.fillStyle = STYLE.water; ctx.fill("nonzero");
       ctx.strokeStyle = STYLE.shore; ctx.lineWidth = px(1.5, 1); ctx.stroke();
     } else if (f.type === 2) {
       ctx.strokeStyle = STYLE.water; ctx.lineWidth = px(STYLE.river[f.properties.kind] ?? 3, 1); path(f); ctx.stroke();
@@ -78,7 +87,7 @@ export function paintTile(ctx, vt, size, mPerPx, opts = {}) {
   ctx.setLineDash([]);
   if (opts.buildings)
     for (const f of features(L.buildings)) if (f.type === 3) {
-      path(f); ctx.fillStyle = STYLE.building; ctx.fill("evenodd");
+      path(f); ctx.fillStyle = STYLE.building; ctx.fill("nonzero");
       ctx.strokeStyle = STYLE.buildingEdge; ctx.lineWidth = Math.max(0.6, 0.8 / mPerPx); ctx.stroke();
     }
   ctx.restore();

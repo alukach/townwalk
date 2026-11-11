@@ -43,5 +43,9 @@ export function pointInRing(px, pz, r) {
   return hit;
 }
 
+// Point in a polygon given as rings, by winding: outer rings have positive ringArea (y/z down), holes negative.
+// Overlapping outers stay filled (unlike even-odd).
+export const inPolygon = (x, z, rings) => rings.reduce((w, r) => w + (pointInRing(x, z, r) ? Math.sign(ringArea(r)) : 0), 0) > 0;
+
 // Mapbox terrain-RGB, as smartmaps/gel packs it.
 export const rgbToHeight = (r, g, b) => -10000 + (r * 65536 + g * 256 + b) * 0.1;

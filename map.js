@@ -8,7 +8,6 @@ const dpr = Math.min(2, devicePixelRatio);
 
 // painted tiles (with buildings), shared by both maps. ponytail: LRU by insertion order, 160 x 1 MB at most
 const painted = new Map();
-let onPainted = () => {};
 function paintedTile(z, x, y) {
   const n = 2 ** z; x = ((x % n) + n) % n;
   if (y < 0 || y >= n) return null;
@@ -20,7 +19,7 @@ function paintedTile(z, x, y) {
   if (painted.size > 160) painted.delete(painted.keys().next().value);
   getVT(z, x, y).then((vt) => {
     if (vt) paintTile(c.getContext("2d"), vt, c.width, tileMPerPx(z, geo.tileYToLat(y + 0.5, z), c.width), { buildings: true, bridges: true });
-    c.ready = true; onPainted();
+    c.ready = true;
   });
   return null;
 }
@@ -37,12 +36,12 @@ function drawMap(ctx, w, h, lon, lat, Z, rot = 0) {
     for (let y = Math.floor(cy - reach); y <= Math.floor(cy + reach); y++) {
       const sx = (x - cx) * T, sy = (y - cy) * T;
       const c = paintedTile(tz, x, y);
-      if (c) { ctx.drawImage(c, sx, sy, T + 0.5, T + 0.5); continue; }
+      if (c) { ctx.drawImage(c, sx, sy, T + 1, T + 1); continue; }
       for (let up = 1; up <= 4 && tz - up >= 0; up++) { // parent fallback
         const p = painted.get(`${tz - up}/${x >> up}/${y >> up}`);
         if (p?.ready) {
           const f = 2 ** up, s = p.width / f;
-          ctx.drawImage(p, (x % f) * s, (y % f) * s, s, s, sx, sy, T + 0.5, T + 0.5);
+          ctx.drawImage(p, (x % f) * s, (y % f) * s, s, s, sx, sy, T + 1, T + 1);
           break;
         }
       }
@@ -70,12 +69,11 @@ export function setupMaps({ player, teleport }) {
   const mini = document.getElementById("minimap"), big = document.getElementById("bigmap"), bigWrap = document.getElementById("map");
   const mctx = canvas(mini), bctx = canvas(big);
   const view = { lon: 0, lat: 0, z: 15 }; // full map view
-  let open = false, dirty = true;
-  onPainted = () => (dirty = true);
+  let open = false;
 
   const toggle = (on = !open) => {
     open = on; bigWrap.hidden = !open;
-    if (open) { const p = player(); Object.assign(view, { lon: p.lon, lat: p.lat, z: 15 }); dirty = true; }
+    if (open) { const p = player(); Object.assign(view, { lon: p.lon, lat: p.lat, z: 15 }); }
   };
   addEventListener("keydown", (e) => {
     if (e.key === "m" || e.key === "M") toggle();
@@ -95,14 +93,14 @@ export function setupMaps({ player, teleport }) {
   big.addEventListener("pointermove", (e) => {
     if (!drag) return;
     const [lon, lat] = at(big.clientWidth / 2 - (e.clientX - drag[0]), big.clientHeight / 2 - (e.clientY - drag[1]));
-    Object.assign(view, { lon, lat }); drag = [e.clientX, e.clientY]; dirty = true;
+    Object.assign(view, { lon, lat }); drag = [e.clientX, e.clientY];
   });
   big.addEventListener("wheel", (e) => { // zoom about the cursor
     e.preventDefault();
     const r = big.getBoundingClientRect(), [lon, lat] = at(e.clientX - r.left, e.clientY - r.top);
     view.z = Math.max(3, Math.min(18, view.z - e.deltaY * 0.0025));
     const [lon2, lat2] = at(e.clientX - r.left, e.clientY - r.top);
-    view.lon += lon - lon2; view.lat += lat - lat2; dirty = true;
+    view.lon += lon - lon2; view.lat += lat - lat2;
   }, { passive: false });
   big.addEventListener("dblclick", (e) => {
     const r = big.getBoundingClientRect();
@@ -120,8 +118,7 @@ export function setupMaps({ player, teleport }) {
       mctx.clearRect(0, 0, w, h);
       drawMap(mctx, w, h, p.lon, p.lat, 16.4, p.yaw);
       arrow(mctx, w / 2, h / 2, 0, 9);
-      if (!open || !dirty) return;
-      dirty = false;
+      if (!open) return; // ponytail: redrawn every frame while open (~100 drawImage), no dirty tracking
       const W = big.clientWidth, H = big.clientHeight;
       bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       bctx.fillStyle = "#4fb3e8"; bctx.fillRect(0, 0, W, H);

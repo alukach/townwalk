@@ -118,8 +118,7 @@ const tint = (g, color) => {
   return g;
 };
 
-// even-odd point-in-polygon over all rings of one feature
-const inPolygon = (x, z, rings) => rings.reduce((h, r) => h !== geo.pointInRing(x, z, r), false);
+const { inPolygon } = geo;
 const bounds = (rings) => {
   const xs = rings.flat().map((p) => p[0]), zs = rings.flat().map((p) => p[1]);
   return { x0: Math.min(...xs), x1: Math.max(...xs), z0: Math.min(...zs), z1: Math.max(...zs) };

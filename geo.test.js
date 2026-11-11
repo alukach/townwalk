@@ -30,4 +30,7 @@ test("rings, point in ring, terrain rgb", () => {
   assert.equal(g.ringArea(sq), 100);
   assert.ok(g.pointInRing(5, 5, sq) && !g.pointInRing(15, 5, sq));
   assert.equal(Math.round(g.rgbToHeight(1, 134, 160)), 0);
+  const hole = [[2, 2], [2, 8], [8, 8], [8, 2]]; // reversed winding
+  assert.ok(!g.inPolygon(5, 5, [sq, hole]) && g.inPolygon(1, 1, [sq, hole]));
+  assert.ok(g.inPolygon(5, 5, [sq, sq])); // overlapping outers stay filled (even-odd would cancel)
 });
