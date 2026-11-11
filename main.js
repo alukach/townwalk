@@ -8,6 +8,7 @@ import { bakeRoads, groundMaterial, roadStyleId, ROAD_STYLE } from "./roads.js";
 import * as geo from "./geo.js";
 import { setupLabels, POI_ICON } from "./labels.js";
 import { setupSearch } from "./search.js";
+import { addFacades } from "./facades.js";
 
 // Raycasts against buildings (camera vs walls, labels vs what's in front of them) go through a BVH per tile mesh.
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -58,6 +59,7 @@ const bands = new THREE.DataTexture(new Uint8Array([0, 0, 170, 255]), 4, 1, THRE
 bands.minFilter = bands.magFilter = THREE.NearestFilter; bands.needsUpdate = true;
 const toon = (o = {}) => new THREE.MeshToonMaterial({ gradientMap: bands, ...o });
 const buildingMat = toon({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }); // faces back a hair so ink lines win
+addFacades(buildingMat); // windows, shopfronts and doors, drawn per pixel from façade coordinates
 buildingMat.shadowSide = THREE.BackSide; // closed solids: back faces in the shadow map, so lit walls don't self-shadow (acne)
 const inkMat = new THREE.LineBasicMaterial({ color: 0x2d2a32 });
 const bridgeMat = toon({ vertexColors: true });
@@ -193,26 +195,50 @@ function buildingStyle(kinds, landuse) {
   if (landuse === "industrial" || landuse === "railway") return "industrial";
   return "house";
 }
-// o: {height, pitched, hash, style, y0 (geometry y of the base), row (metres per extrusion step, ~1.6 = half a storey)}
+// o: {height, pitched, hash, style, tower, top, edges: [{ax, az, bx, bz, ground, door}]} (local metres; door = metres
+// along that edge, or -1). Colours each triangle (roof or wall) and gives every wall vertex façade coordinates for the
+// building shader (facades.js): u along its footprint edge, v above the ground at that edge, the edge's length, the
+// wall's height; plus style, a random per building, and the door position.
+const STYLE_ID = { house: 0, shop: 1, church: 2, brick: 3, civic: 4, industrial: 5, tower: 6 };
 function paintBuilding(g, o) {
   const st = STYLES[o.style], wall = st.walls[o.hash % st.walls.length].clone();
   wall.lerp(rampColor(o.height, new THREE.Color()), Math.min(1, Math.max(0, (o.height - 10) / 60)));
+  if (o.tower) wall.lerp(GLASS, 0.35);
   const roof = o.pitched ? st.roof ?? ROOFS[(o.hash >>> 8) % ROOFS.length] : st.roof ?? FLAT_ROOF;
-  const awning = AWNINGS[(o.hash >>> 4) % AWNINGS.length], windows = o.height >= 10 && o.style !== "church";
-  if (o.tower) wall.lerp(GLASS, 0.55); // towers: a glass curtain wall instead of bands (bands shimmer at that size)
-  const P = g.attributes.position, n = g.attributes.normal, a = new Float32Array(P.count * 3);
-  for (let t = 0; t < P.count; t += 3) {
-    const ny = (n.getY(t) + n.getY(t + 1) + n.getY(t + 2)) / 3, cy = (P.getY(t) + P.getY(t + 1) + P.getY(t + 2)) / 3 - o.y0;
-    const r = Math.floor(cy / o.row); // half-storey row: even = wall, odd = window height
-    const col = ny > 0.25 ? roof
-      : st.awning && r === 0 ? GLASS // shop window
-      : st.awning && r === 1 ? awning // awning over it
-      : windows && !o.tower && r >= 1 && r % 2 === 1 ? GLASS : wall;
-    for (let k = 0; k < 3; k++) a.set([col.r, col.g, col.b], (t + k) * 3);
+  const P = g.attributes.position, n = g.attributes.normal, N = P.count;
+  const col = new Float32Array(N * 3), fac = new Float32Array(N * 4), meta = new Float32Array(N * 4);
+  const sid = o.tower ? STYLE_ID.tower : STYLE_ID[o.style], rnd = ((o.hash >>> 12) % 1000) / 1000;
+  for (let t = 0; t < N; t += 3) {
+    const ny = (n.getY(t) + n.getY(t + 1) + n.getY(t + 2)) / 3, c = ny > 0.25 ? roof : wall;
+    for (let k = 0; k < 3; k++) col.set([c.r, c.g, c.b], (t + k) * 3);
+    if (Math.abs(ny) > 0.25) continue; // roofs and floors get no façade
+    // which footprint edge is this wall on? the one its centre lies on
+    const cx = (P.getX(t) + P.getX(t + 1) + P.getX(t + 2)) / 3, cz = (P.getZ(t) + P.getZ(t + 1) + P.getZ(t + 2)) / 3;
+    let best = null, bd = 0.5;
+    for (const ed of o.edges) {
+      const dx = ed.bx - ed.ax, dz = ed.bz - ed.az, l2 = dx * dx + dz * dz || 1;
+      const k = Math.max(0, Math.min(1, ((cx - ed.ax) * dx + (cz - ed.az) * dz) / l2)), d = Math.hypot(cx - ed.ax - k * dx, cz - ed.az - k * dz);
+      if (d < bd) { bd = d; best = ed; }
+    }
+    if (!best) continue;
+    const len = Math.hypot(best.bx - best.ax, best.bz - best.az), ux = (best.bx - best.ax) / len, uz = (best.bz - best.az) / len;
+    for (let k = 0; k < 3; k++) {
+      const i = t + k;
+      fac.set([(P.getX(i) - best.ax) * ux + (P.getZ(i) - best.az) * uz, P.getY(i) - (best.ground - base), len, o.top - best.ground], i * 4);
+      meta.set([sid, rnd, best.door, 0], i * 4);
+    }
   }
-  g.setAttribute("color", new THREE.BufferAttribute(a, 3));
+  g.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  g.setAttribute("facade", new THREE.BufferAttribute(fac, 4));
+  g.setAttribute("fmeta", new THREE.BufferAttribute(meta, 4));
   return g;
 }
+// geometry with no façade (spires): zero attributes so it merges with the buildings
+const noFacade = (g) => {
+  g.setAttribute("facade", new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 4), 4));
+  g.setAttribute("fmeta", new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 4), 4));
+  return g;
+};
 
 const tint = (g, color) => {
   const n = g.attributes.position.count, a = new Float32Array(n * 3);
@@ -308,7 +334,7 @@ async function loadTile(x, y) {
   tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
   // roads: a baked distance field the ground paints from (roads.js), so they drape exactly
   const [x0m, z0m] = fromTile(0, 0), [x1m, z1m] = fromTile(E, E), Wm = x1m - x0m, Hm = z1m - z0m; // tile size, metres
-  const segs = [], streets = [];
+  const segs = [], streets = [], roadLines = []; // roadLines: every drawn road, local metres (doors face them)
   for (const f of layerFeatures("roads")) {
     if (f.type !== 2) continue;
     const id = roadStyleId(f.properties);
@@ -318,6 +344,7 @@ async function loadTile(x, y) {
       for (let i = 1; i < pts.length; i++) {
         const [ax, az] = pts[i - 1], [bx, bz] = pts[i];
         if (id) segs.push({ ax: ax - x0m, ay: z1m - az, bx: bx - x0m, by: z1m - bz, hw: ROAD_STYLE[id].width / 2, id, along });
+        if (id && f.properties.kind !== "rail") roadLines.push([ax, az, bx, bz]);
         if (f.properties.name && f.properties.kind !== "path" && f.properties.kind !== "rail")
           streets.push({ ax, az, bx, bz, name: f.properties.name, ref: f.properties.ref });
         along += Math.hypot(bx - ax, bz - az);
@@ -390,19 +417,43 @@ async function loadTile(x, y) {
       const b = bounds([outer]), inside = named.filter((p) => within(p.x, p.z, b) && geo.pointInRing(p.x, p.z, outer));
       const cx = outer.reduce((s, p) => s + p[0], 0) / outer.length, cz = outer.reduce((s, p) => s + p[1], 0) / outer.length;
       const style = buildingStyle(inside.map((p) => p.kind), landuseAt(cx, cz));
-      const tower = height > 40;
-      const depth = top - bottom, steps = tower ? 1 : Math.max(1, Math.round(depth / 1.6)); // ~1.6 m rows: awnings, window bands
+      const tower = height > 40, depth = top - bottom, steps = 1; // windows and doors are drawn by the shader
       const g = new THREE.ExtrudeGeometry(shape, pitched
         ? { depth, steps, bevelEnabled: true, bevelThickness: roofH, bevelSize: inset, bevelOffset: -inset, bevelSegments: 1 }
         : { depth, steps, bevelEnabled: false });
       // extrude along +z, stand up: (sx, sy, d) -> (sx, d, -sy) = (x, up, z)
       g.rotateX(-Math.PI / 2).translate(0, bottom - base, 0);
       const hash = (i * 2654435761 + x * 31 + y * 17) >>> 0;
-      geoms.push(paintBuilding(g, { height, pitched, hash, style, tower, y0: bottom - base, row: depth / steps }));
+      // footprint edges, each with its own ground level; the door goes on the outer edge nearest a road, at the point
+      // facing it (only on ground-standing buildings, on edges wide enough for one)
+      const edges = [];
+      [outer, ...holes].forEach((ring, ri) => ring.forEach((a, k) => {
+        const b = ring[(k + 1) % ring.length], g0 = groundAt((a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+        edges.push({ ax: a[0], az: a[1], bx: b[0], bz: b[1], ground: Number.isFinite(g0) ? g0 : lo, door: -1, outer: ri === 0 });
+      }));
+      if (!minH) {
+        let best = null;
+        for (const ed of edges) {
+          const len = Math.hypot(ed.bx - ed.ax, ed.bz - ed.az);
+          if (!ed.outer || len < 3) continue;
+          const mx = (ed.ax + ed.bx) / 2, mz = (ed.az + ed.bz) / 2;
+          for (const [rax, raz, rbx, rbz] of roadLines) {
+            if (Math.max(rax, rbx) < b.x0 - 40 || Math.min(rax, rbx) > b.x1 + 40 || Math.max(raz, rbz) < b.z0 - 40 || Math.min(raz, rbz) > b.z1 + 40) continue;
+            const dx = rbx - rax, dz = rbz - raz, l2 = dx * dx + dz * dz || 1;
+            const t = Math.max(0, Math.min(1, ((mx - rax) * dx + (mz - raz) * dz) / l2)), px = rax + t * dx, pz = raz + t * dz, d = Math.hypot(mx - px, mz - pz);
+            if (!best || d < best.d) {
+              const u = ((px - ed.ax) * (ed.bx - ed.ax) + (pz - ed.az) * (ed.bz - ed.az)) / len; // road's nearest point, along the edge
+              best = { d, ed, u: Math.max(1.5, Math.min(len - 1.5, u)) };
+            }
+          }
+        }
+        if (best && best.d < 40) best.ed.door = best.u;
+      }
+      geoms.push(paintBuilding(g, { height, pitched, hash, style, tower, top, edges }));
       if (STYLES[style].steeple) { // a spire on the roof
         const spire = new THREE.ConeGeometry(Math.min(2.2, Math.sqrt(area) * 0.12), Math.max(7, height * 0.9), 6).toNonIndexed();
         spire.translate(cx, top - base + (pitched ? roofH : 0) + Math.max(7, height * 0.9) / 2 - 0.3, cz);
-        geoms.push(tint(spire, STYLES.church.roof));
+        geoms.push(noFacade(tint(spire, STYLES.church.roof)));
       }
       const roofTop = top + (pitched ? roofH : 0);
       for (const p of inside) p.y = roofTop - base + 2.5; // labels float over the roof
