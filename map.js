@@ -18,7 +18,7 @@ function paintedTile(z, x, y) {
   painted.set(k, c);
   if (painted.size > 160) painted.delete(painted.keys().next().value);
   getVT(z, x, y).then((vt) => {
-    if (vt) paintTile(c.getContext("2d"), vt, c.width, tileMPerPx(z, geo.tileYToLat(y + 0.5, z), c.width), { buildings: true, bridges: true });
+    if (vt) paintTile(c.getContext("2d"), vt, c.width, tileMPerPx(z, geo.tileYToLat(y + 0.5, z), c.width), { buildings: true, bridges: true, labels: z >= 15 });
     c.ready = true;
   });
   return null;

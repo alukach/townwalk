@@ -2,6 +2,20 @@
 // clipped rings overlap (whole-tile squares), which punched tile-shaped holes in woods.
 // One cartoon style for OSM vector tiles, painted to a canvas: the 3D ground texture, the minimap and the full map.
 
+// POI kind -> icon. Unknown kinds with a name get a pin.
+export const POI_ICON = {
+  restaurant: "🍽️", cafe: "☕", fast_food: "🍔", bar: "🍺", pub: "🍺", ice_cream: "🍦", bakery: "🥐",
+  hotel: "🏨", motel: "🏨", hostel: "🛏️", guest_house: "🏡", camp_site: "⛺",
+  supermarket: "🛒", convenience: "🏪", clothes: "👕", books: "📚", hardware: "🔧", bicycle: "🚲", florist: "💐",
+  bank: "🏦", atm: "🏧", post_office: "📮", pharmacy: "💊", hospital: "🏥", clinic: "🩺", dentist: "🦷", doctors: "🩺",
+  library: "📚", school: "🏫", college: "🎓", university: "🎓", kindergarten: "🧸",
+  townhall: "🏛️", courthouse: "⚖️", police: "🚓", fire_station: "🚒", museum: "🏛️", theatre: "🎭", cinema: "🎬",
+  arts_centre: "🎨", community_centre: "🏘️", sports_centre: "🏟️", ice_rink: "⛸️", swimming_pool: "🏊", stadium: "🏟️",
+  park: "🌳", playground: "🛝", garden: "🌷", viewpoint: "🔭", attraction: "⭐", information: "ℹ️",
+  place_of_worship: "⛪", fuel: "⛽", aerodrome: "✈️", ferry_terminal: "⛴️", bus_station: "🚌", station: "🚉",
+  marina: "⛵", beach: "🏖️", golf_course: "⛳", zoo: "🦁",
+};
+
 export const STYLE = {
   water: "#4fb3e8", shore: "#2f86c2", land: "#a8d672",
   landuse: {
@@ -45,6 +59,7 @@ function features(layer, by = rank) {
 // Paint tile `vt` into ctx's [0, size] square. mPerPx: metres per canvas pixel (sets line widths).
 // opts.buildings: draw footprints (maps). opts.bridges: draw bridge roads (off for the 3D ground, which has decks).
 // opts.roads === false: skip roads (the 3D ground draws them as geometry, which stays sharp up close).
+// opts.labels: street names along roads and POI icons (maps, at street zooms).
 export function paintTile(ctx, vt, size, mPerPx, opts = {}) {
   const L = vt.layers;
   const E = (L.earth ?? L.roads ?? L.water ?? Object.values(L)[0])?.extent ?? 4096, s = size / E;
@@ -91,7 +106,41 @@ export function paintTile(ctx, vt, size, mPerPx, opts = {}) {
       path(f); ctx.fillStyle = STYLE.building; ctx.fill("nonzero");
       ctx.strokeStyle = STYLE.buildingEdge; ctx.lineWidth = Math.max(0.6, 0.8 / mPerPx); ctx.stroke();
     }
+  if (opts.labels) drawLabels(ctx, L, s, size);
   ctx.restore();
+}
+
+// Street names on each named road's longest segment (kept upright, skipped if it won't fit), then POI icons.
+function drawLabels(ctx, L, s, size) {
+  const fs = size / 24; // ~10.7 css px on a 256 px tile
+  ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.lineJoin = "round";
+  ctx.font = `600 ${fs}px system-ui, sans-serif`;
+  const seen = new Set();
+  for (const f of features(L.roads)) {
+    const name = f.properties.name;
+    if (f.type !== 2 || !name || seen.has(name)) continue;
+    let best = null;
+    for (const line of f.loadGeometry())
+      for (let i = 1; i < line.length; i++) {
+        const ax = line[i - 1].x * s, ay = line[i - 1].y * s, bx = line[i].x * s, by = line[i].y * s, len = Math.hypot(bx - ax, by - ay);
+        if (!best || len > best.len) best = { len, mx: (ax + bx) / 2, my: (ay + by) / 2, ang: Math.atan2(by - ay, bx - ax) };
+      }
+    const w = ctx.measureText(name).width;
+    if (!best || best.len < w + fs || best.mx < w / 2 || best.mx > size - w / 2 || best.my < fs || best.my > size - fs) continue;
+    seen.add(name); // one label per street per tile
+    let a = best.ang; if (a > Math.PI / 2) a -= Math.PI; if (a < -Math.PI / 2) a += Math.PI;
+    ctx.save(); ctx.translate(best.mx, best.my); ctx.rotate(a);
+    ctx.lineWidth = fs * 0.35; ctx.strokeStyle = "#ffffffee"; ctx.strokeText(name, 0, 0);
+    ctx.fillStyle = "#3b3b45"; ctx.fillText(name, 0, 0);
+    ctx.restore();
+  }
+  ctx.font = `${fs * 0.75}px system-ui, sans-serif`; // the minimap shows z15 tiles ~2.6x up
+  for (const f of features(L.pois)) {
+    const icon = f.type === 1 && f.properties.name && POI_ICON[f.properties.kind];
+    if (!icon) continue;
+    const p = f.loadGeometry()[0][0];
+    ctx.fillText(icon, p.x * s, p.y * s);
+  }
 }
 
 // metres per pixel of a `size`-px tile at zoom z, latitude lat

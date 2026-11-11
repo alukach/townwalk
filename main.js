@@ -3,6 +3,7 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { stats, dem, getVT } from "./data.js";
 import { paintTile, tileMPerPx, STYLE } from "./paint.js";
 import { setupMaps } from "./map.js";
+import { bakeRoads, groundMaterial, roadStyleId, ROAD_STYLE } from "./roads.js";
 import * as geo from "./geo.js";
 
 // ---- where -----------------------------------------------------------------------------------------------------
@@ -13,8 +14,8 @@ const BUILD_Z = 15, DEM_Z = 12; // z15 vector tiles (~0.8 km here), z12 elevatio
 // Phones and tablets get a lighter profile: less GPU memory, fewer pixels, a smaller world around you.
 const MOBILE = matchMedia("(pointer: coarse)").matches || q.has("mobile");
 const PROFILE = MOBILE
-  ? { dpr: 1.5, groundPx: 1024, shadowPx: 1024, shadowR: 70, buildR: 450, treeMax: 3500 }
-  : { dpr: 2, groundPx: 2048, shadowPx: 2048, shadowR: 110, buildR: 700, treeMax: 9000 };
+  ? { dpr: 1.5, groundPx: 512, roadPx: 512, shadowPx: 1024, shadowR: 70, buildR: 450, treeMax: 3500 }
+  : { dpr: 2, groundPx: 1024, roadPx: 1024, shadowPx: 2048, shadowR: 90, buildR: 700, treeMax: 9000 };
 const BUILD_R = PROFILE.buildR, DEM_R = 1500; // metres of data kept loaded around the walker
 const TERRAIN_DROP = 2; // far terrain sits this far under the painted ground, so the ground always wins
 let base = null; // elevation at the start, so y stays near 0
@@ -24,7 +25,7 @@ const SKY = 0xa8d8ff;
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, PROFILE.dpr));
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.BasicShadowMap; // hard edges suit the cartoon look (PCF smeared on walls edge-on to the sun)
+renderer.shadowMap.type = THREE.PCFSoftShadowMap; // soft edges; walls turned from the sun are unlit anyway (see bands)
 document.body.prepend(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(SKY);
@@ -165,30 +166,6 @@ const bounds = (rings) => {
   return { x0: Math.min(...xs), x1: Math.max(...xs), z0: Math.min(...zs), z1: Math.max(...zs) };
 };
 
-// A road ribbon of width w along pts ([x, z] local) into L, heights from surf(x, z) + a lift; long segments are split so
-// the ribbon follows the slope, and a disc at every vertex makes round joins and caps.
-const roadMats = {};
-function ribbon(L, pts, w, hex, surf, lift = 0.12) {
-  const c = new THREE.Color(hex), dense = [pts[0]];
-  for (let i = 1; i < pts.length; i++) {
-    const [ax, az] = pts[i - 1], [bx, bz] = pts[i], n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / 6));
-    for (let k = 1; k <= n; k++) dense.push([ax + ((bx - ax) * k) / n, az + ((bz - az) * k) / n]);
-  }
-  const vert = (vx, vz) => { L.pos.push(vx, surf(vx, vz) + lift, vz); L.col.push(c.r, c.g, c.b); return L.pos.length / 3 - 1; };
-  const h = w / 2;
-  for (let i = 1; i < dense.length; i++) {
-    const [ax, az] = dense[i - 1], [bx, bz] = dense[i], len = Math.hypot(bx - ax, bz - az) || 1;
-    const nx = (-(bz - az) / len) * h, nz = ((bx - ax) / len) * h;
-    const a0 = vert(ax + nx, az + nz), a1 = vert(ax - nx, az - nz), b0 = vert(bx + nx, bz + nz), b1 = vert(bx - nx, bz - nz);
-    L.idx.push(a0, b0, a1, a1, b0, b1);
-  }
-  for (const [px, pz] of pts) { // round joins/caps
-    const centre = vert(px, pz), ring = [];
-    for (let k = 0; k < 10; k++) ring.push(vert(px + Math.cos((k / 10) * 2 * Math.PI) * h, pz + Math.sin((k / 10) * 2 * Math.PI) * h));
-    for (let k = 0; k < 10; k++) L.idx.push(centre, ring[(k + 1) % 10], ring[k]);
-  }
-}
-
 // A cartoon pine: trunk and two cones, coloured per vertex, drawn instanced per tile.
 const TREE = (() => {
   const part = (g, hex, dy) => tint(g.translate(0, dy, 0), new THREE.Color(hex));
@@ -207,7 +184,7 @@ const TREE_DENSITY = { // painted ground colour -> chance of a tree per grid cel
 };
 
 const G = 65; // ground patch verts per side (~12 m apart)
-const GROUND_PX = PROFILE.groundPx; // 2048: ~0.4 m per pixel, ~22 MB of GPU per tile; 1024 on phones
+const GROUND_PX = PROFILE.groundPx; // land use + water only (roads are a baked field, below): ~0.8 m per pixel
 const tiles = new Map(); // "x/y" -> Promise<tile|null>
 const ready = new Map(); // "x/y" -> {foots, water, bridges}, for synchronous collision
 
@@ -243,43 +220,30 @@ async function loadTile(x, y) {
   paintTile(cv.getContext("2d"), vt, GROUND_PX, tileMPerPx(BUILD_Z, geo.tileYToLat(y + 0.5, BUILD_Z), GROUND_PX), { roads: false });
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  objects.push(Object.assign(new THREE.Mesh(gg, toon({ map: tex })), { receiveShadow: true }));
+  // roads: a baked distance field the ground paints from (roads.js), so they drape exactly
+  const [x0m, z0m] = fromTile(0, 0), [x1m, z1m] = fromTile(E, E), Wm = x1m - x0m, Hm = z1m - z0m; // tile size, metres
+  const segs = [], streets = [];
+  for (const f of layerFeatures("roads")) {
+    if (f.type !== 2) continue;
+    const id = roadStyleId(f.properties);
+    for (const line of f.loadGeometry()) {
+      const pts = line.map((p) => fromTile(p.x * (E / f.extent), p.y * (E / f.extent)));
+      let along = 0;
+      for (let i = 1; i < pts.length; i++) {
+        const [ax, az] = pts[i - 1], [bx, bz] = pts[i];
+        if (id) segs.push({ ax: ax - x0m, ay: z1m - az, bx: bx - x0m, by: z1m - bz, hw: ROAD_STYLE[id].width / 2, id, along });
+        if (f.properties.name && f.properties.kind !== "path" && f.properties.kind !== "rail")
+          streets.push({ ax, az, bx, bz, name: f.properties.name, ref: f.properties.ref });
+        along += Math.hypot(bx - ax, bz - az);
+      }
+    }
+  }
+  const roadTex = bakeRoads(renderer, segs, Wm, Hm, PROFILE.roadPx);
+  objects.push(Object.assign(new THREE.Mesh(gg, groundMaterial(bands, tex, roadTex)), { receiveShadow: true }));
   // where trees may grow: a small paint of the same tile *with* roads, so trees keep off roads and paths
   const mask = new OffscreenCanvas(MASK_PX, MASK_PX).getContext("2d", { willReadFrequently: true });
   paintTile(mask, vt, MASK_PX, tileMPerPx(BUILD_Z, geo.tileYToLat(y + 0.5, BUILD_Z), MASK_PX));
   const groundPx = mask.getImageData(0, 0, MASK_PX, MASK_PX).data;
-
-  // roads: ribbons draped on the ground patch's own surface (bilinear on its grid), casings under fills
-  const surf = (lx, lz) => {
-    const [lon, lat] = frame.toLonLat(lx, lz);
-    const u = Math.max(0, Math.min(G - 1.001, (geo.lonToTileX(lon, BUILD_Z) - x) * (G - 1)));
-    const v = Math.max(0, Math.min(G - 1.001, (geo.latToTileY(lat, BUILD_Z) - y) * (G - 1)));
-    const i = Math.floor(u), j = Math.floor(v), a = u - i, b = v - j, Y = (ii, jj) => pos[(jj * G + ii) * 3 + 1];
-    return (Y(i, j) * (1 - a) + Y(i + 1, j) * a) * (1 - b) + (Y(i, j + 1) * (1 - a) + Y(i + 1, j + 1) * a) * b;
-  };
-  const layers = {}; // name -> {pos: [], col: [], idx: []}
-  const add = (name) => (layers[name] ??= { pos: [], col: [], idx: [] });
-  for (const f of layerFeatures("roads")) {
-    if (f.type !== 2 || f.properties.is_tunnel || f.properties.is_bridge) continue;
-    const st = STYLE.road(f.properties);
-    if (!st) continue;
-    const [w, fill, casing] = st, major = f.properties.kind === "highway" || f.properties.kind === "major_road";
-    for (const line of f.loadGeometry()) {
-      const pts = line.map((p) => fromTile(p.x * (E / f.extent), p.y * (E / f.extent)));
-      if (casing) ribbon(add("casing"), pts, w + 0.8, casing, surf); // a thin ink edge, 0.4 m a side
-      ribbon(add(major ? "major" : "minor"), pts, w, fill, surf);
-    }
-  }
-  // draw order without z-fighting: each layer a step closer to the camera in depth
-  for (const [name, off] of [["casing", -2], ["minor", -4], ["major", -6]]) {
-    const L = layers[name];
-    if (!L) continue;
-    const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.Float32BufferAttribute(L.pos, 3));
-    g.setAttribute("color", new THREE.Float32BufferAttribute(L.col, 3));
-    g.setIndex(L.idx); g.computeVertexNormals();
-    objects.push(Object.assign(new THREE.Mesh(g, roadMats[name] ??= toon({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: off, polygonOffsetUnits: off })), { receiveShadow: true }));
-  }
 
   // buildings
   const geoms = [], foots = [], c = new THREE.Color();
@@ -375,7 +339,7 @@ async function loadTile(x, y) {
   }
 
   objects.forEach((o) => scene.add(o));
-  return { objects, foots, water, bridges, treeCells };
+  return { objects, foots, water, bridges, treeCells, streets };
 }
 
 // ---- collision ---------------------------------------------------------------------------------------------------
@@ -422,6 +386,7 @@ function stream() {
       scene.remove(o);
       if (o.isInstancedMesh) o.dispose(); else o.geometry.dispose(); // trees share one geometry
       if (o.material.map) { o.material.map.dispose(); o.material.dispose(); }
+      if (o.material.userData.roadTex) o.material.userData.roadTex.userData.rt.dispose();
     }));
   }
   const keepDem = near(DEM_Z, DEM_R);
