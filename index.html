@@ -2,10 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <title>Town Walk</title>
   <style>
-    html, body { margin: 0; height: 100%; overflow: hidden; background: #a8d8ff; font: 13px/1.4 system-ui, sans-serif; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #a8d8ff; font: 13px/1.4 system-ui, sans-serif;
+      touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
     canvas { display: block; }
     .panel { position: fixed; padding: 8px 10px; border-radius: 8px; background: #fffd; color: #222; }
     #hud { left: 12px; top: 12px; white-space: pre; }
@@ -19,6 +20,25 @@
     #map header { color: #fff; padding: 10px 16px; font-weight: 600; }
     #bigmap { width: calc(100% - 32px); height: calc(100% - 16px); margin: 0 16px 16px; border: 5px solid #23262e;
       border-radius: 14px; box-sizing: border-box; cursor: grab; touch-action: none; }
+    /* touch: a stick bottom-right, the keyboard hint swapped out */
+    #stick { position: fixed; right: max(20px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom));
+      width: 140px; height: 140px; border-radius: 50%; background: #23262e55; border: 3px solid #23262ecc; display: none; }
+    #stick > div { position: absolute; left: 35%; top: 35%; width: 30%; height: 30%; border-radius: 50%;
+      background: #ffd166; border: 3px solid #23262e; pointer-events: none; }
+    .touch { display: none; }
+    @media (pointer: coarse) {
+      #stick { display: block; }
+      #help .keys { display: none; } #help .touch { display: inline; }
+      #help { right: auto; left: 50%; transform: translateX(-50%); top: 12px; bottom: auto; }
+    }
+    @media (max-width: 700px) {
+      #hud { font-size: 11px; padding: 6px 8px; }
+      #help { font-size: 11px; white-space: nowrap; top: auto; bottom: 178px; }
+      #minimap { width: 140px; height: 140px; left: 12px; bottom: max(12px, env(safe-area-inset-bottom)); border-width: 4px; }
+      #mapbtn { left: 122px; bottom: 122px; width: 34px; height: 34px; }
+      #bigmap { width: calc(100% - 16px); margin: 0 8px 8px; }
+      #map header { font-size: 12px; padding: 8px 10px; }
+    }
   </style>
   <script type="importmap">
     {
@@ -34,11 +54,12 @@
 </head>
 <body>
   <div id="hud" class="panel">loading…</div>
-  <div id="help" class="panel">WASD / arrows to walk · Shift to run · M for the map</div>
+  <div id="help" class="panel"><span class="keys">WASD / arrows to walk · Shift to run · M for the map</span><span class="touch">Stick to walk (push to the rim to run) · tap M for the map</span></div>
+  <div id="stick"><div></div></div>
   <canvas id="minimap"></canvas>
   <button id="mapbtn" title="Map (M)">M</button>
   <div id="map" hidden>
-    <header>Drag to pan · scroll to zoom · double-click to jump there · M or Esc to close</header>
+    <header>Drag to pan · scroll or pinch to zoom · double-click or double-tap to jump there · M or Esc to close</header>
     <canvas id="bigmap"></canvas>
   </div>
   <script type="module" src="main.js"></script>

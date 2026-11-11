@@ -87,26 +87,49 @@ export function setupMaps({ player, teleport }) {
     const tx = geo.lonToTileX(view.lon, tz) + (mx - big.clientWidth / 2) / T, ty = geo.latToTileY(view.lat, tz) + (my - big.clientHeight / 2) / T;
     return [geo.tileXToLon(tx, tz), geo.tileYToLat(ty, tz)];
   };
-  let drag = null;
-  big.addEventListener("pointerdown", (e) => { drag = [e.clientX, e.clientY]; big.setPointerCapture(e.pointerId); });
-  big.addEventListener("pointerup", () => (drag = null));
-  big.addEventListener("pointermove", (e) => {
-    if (!drag) return;
-    const [lon, lat] = at(big.clientWidth / 2 - (e.clientX - drag[0]), big.clientHeight / 2 - (e.clientY - drag[1]));
-    Object.assign(view, { lon, lat }); drag = [e.clientX, e.clientY];
-  });
-  big.addEventListener("wheel", (e) => { // zoom about the cursor
-    e.preventDefault();
-    const r = big.getBoundingClientRect(), [lon, lat] = at(e.clientX - r.left, e.clientY - r.top);
-    view.z = Math.max(3, Math.min(18, view.z - e.deltaY * 0.0025));
-    const [lon2, lat2] = at(e.clientX - r.left, e.clientY - r.top);
+  // zoom by dz keeping the point under (mx, my) fixed
+  const zoomAbout = (mx, my, dz) => {
+    const [lon, lat] = at(mx, my);
+    view.z = Math.max(3, Math.min(18, view.z + dz));
+    const [lon2, lat2] = at(mx, my);
     view.lon += lon - lon2; view.lat += lat - lat2;
-  }, { passive: false });
-  big.addEventListener("dblclick", (e) => {
-    const r = big.getBoundingClientRect();
-    teleport(...at(e.clientX - r.left, e.clientY - r.top));
-    toggle(false);
+  };
+  const jump = (mx, my) => { teleport(...at(mx, my)); toggle(false); };
+
+  // pointers: one drags, two pinch-zoom; a double tap (touch) or double click (mouse) jumps
+  const pts = new Map(); // pointerId -> [x, y] (canvas css px)
+  let pinch = null, lastTap = null, touchedAt = -1e9;
+  const local = (e) => { const r = big.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  big.addEventListener("pointerdown", (e) => {
+    pts.set(e.pointerId, local(e)); pinch = null;
+    try { big.setPointerCapture(e.pointerId); } catch {} // keep the drag when the pointer leaves the map
+    if (e.pointerType === "touch") touchedAt = performance.now();
   });
+  big.addEventListener("pointermove", (e) => {
+    if (!pts.has(e.pointerId)) return;
+    const prev = pts.get(e.pointerId), cur = local(e);
+    pts.set(e.pointerId, cur);
+    if (pts.size === 1) {
+      const [lon, lat] = at(big.clientWidth / 2 - (cur[0] - prev[0]), big.clientHeight / 2 - (cur[1] - prev[1]));
+      Object.assign(view, { lon, lat });
+    } else if (pts.size === 2) {
+      const [a, b] = [...pts.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+      if (pinch) zoomAbout((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, Math.log2(d / pinch));
+      pinch = d;
+    }
+  });
+  const up = (e) => {
+    const p = pts.get(e.pointerId);
+    pts.delete(e.pointerId); if (pts.size < 2) pinch = null;
+    if (e.pointerType !== "touch" || !p || e.type !== "pointerup") return;
+    const now = performance.now();
+    if (lastTap && now - lastTap.t < 320 && Math.hypot(p[0] - lastTap.p[0], p[1] - lastTap.p[1]) < 30) { lastTap = null; jump(...p); }
+    else lastTap = { t: now, p };
+  };
+  big.addEventListener("pointerup", up);
+  big.addEventListener("pointercancel", up);
+  big.addEventListener("wheel", (e) => { e.preventDefault(); zoomAbout(...local(e), -e.deltaY * 0.0025); }, { passive: false });
+  big.addEventListener("dblclick", (e) => { if (performance.now() - touchedAt > 800) jump(...local(e)); }); // mouse; touch jumps on double tap above
 
   return {
     get open() { return open; },

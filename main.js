@@ -10,37 +10,53 @@ const q = new URLSearchParams(location.search);
 const START = [+(q.get("lon") ?? -117.2913), +(q.get("lat") ?? 49.4936)]; // default: Baker St, Nelson BC
 const frame = geo.localFrame(...START);
 const BUILD_Z = 15, DEM_Z = 12; // z15 vector tiles (~0.8 km here), z12 elevation (~6 km, 512 px)
-const BUILD_R = 700, DEM_R = 1500; // metres of data kept loaded around the walker
+// Phones and tablets get a lighter profile: less GPU memory, fewer pixels, a smaller world around you.
+const MOBILE = matchMedia("(pointer: coarse)").matches || q.has("mobile");
+const PROFILE = MOBILE
+  ? { dpr: 1.5, groundPx: 1024, shadowPx: 1024, shadowR: 70, buildR: 450, treeMax: 3500 }
+  : { dpr: 2, groundPx: 2048, shadowPx: 2048, shadowR: 110, buildR: 700, treeMax: 9000 };
+const BUILD_R = PROFILE.buildR, DEM_R = 1500; // metres of data kept loaded around the walker
 const TERRAIN_DROP = 2; // far terrain sits this far under the painted ground, so the ground always wins
 let base = null; // elevation at the start, so y stays near 0
 
 // ---- scene -----------------------------------------------------------------------------------------------------
 const SKY = 0xa8d8ff;
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(devicePixelRatio);
+renderer.setPixelRatio(Math.min(devicePixelRatio, PROFILE.dpr));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.BasicShadowMap; // hard edges suit the cartoon look (PCF smeared on walls edge-on to the sun)
 document.body.prepend(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(SKY);
 scene.fog = new THREE.Fog(SKY, 400, 1400);
 const camera = new THREE.PerspectiveCamera(60, 1, 0.5, 5000);
 scene.add(new THREE.HemisphereLight(0xffffff, 0x8aa37a, 1.3));
+// The sun casts shadows in a box that follows the walker (moved each frame, below).
 const sun = new THREE.DirectionalLight(0xffffff, 2.6);
-sun.position.set(300, 600, 200);
-scene.add(sun);
+const SUN_DIR = new THREE.Vector3(300, 600, 200).normalize();
+sun.castShadow = true;
+sun.shadow.mapSize.set(PROFILE.shadowPx, PROFILE.shadowPx);
+Object.assign(sun.shadow.camera, { left: -PROFILE.shadowR, right: PROFILE.shadowR, top: PROFILE.shadowR, bottom: -PROFILE.shadowR, near: 10, far: 1500 });
+sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.9;
+scene.add(sun, sun.target);
 const resize = () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); };
 addEventListener("resize", resize); resize();
 
 // cartoon look: three flat light bands (toon shading) and dark ink lines on building edges
-const bands = new THREE.DataTexture(new Uint8Array([110, 185, 255]), 3, 1, THREE.RedFormat);
+// toon reads the gradient at N·L*0.5+0.5: faces turned from the sun get no sun at all, so they match cast shadows
+// exactly (no smeared band where the two meet); lit faces get two bands.
+const bands = new THREE.DataTexture(new Uint8Array([0, 0, 170, 255]), 4, 1, THREE.RedFormat);
 bands.minFilter = bands.magFilter = THREE.NearestFilter; bands.needsUpdate = true;
 const toon = (o = {}) => new THREE.MeshToonMaterial({ gradientMap: bands, ...o });
 const buildingMat = toon({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }); // faces back a hair so ink lines win
+buildingMat.shadowSide = THREE.BackSide; // closed solids: back faces in the shadow map, so lit walls don't self-shadow (acne)
 const inkMat = new THREE.LineBasicMaterial({ color: 0x2d2a32 });
 const bridgeMat = toon({ vertexColors: true });
 const terrainMat = toon({ vertexColors: true });
 const treeMat = toon({ vertexColors: true });
 const playerGeo = new THREE.CapsuleGeometry(0.35, 1.1, 4, 12);
 const player = new THREE.Mesh(playerGeo, toon({ color: 0xe4572e }));
+player.castShadow = true;
 const hull = new THREE.Mesh(playerGeo, new THREE.MeshBasicMaterial({ color: 0x2d2a32, side: THREE.BackSide })); // ink outline
 hull.scale.setScalar(1.12);
 player.add(hull);
@@ -83,6 +99,7 @@ async function loadDem(x, y) {
   g.setIndex(idx);
   g.computeVertexNormals();
   const mesh = new THREE.Mesh(g, terrainMat);
+  mesh.receiveShadow = true;
   scene.add(mesh);
   return { grid, mesh };
 }
@@ -182,15 +199,15 @@ const TREE = (() => {
   ]);
 })();
 const MASK_PX = 512; // ~1.6 m per pixel
-const TREE_SPACING = 9, TREE_MAX = 6000; // metres between grid cells; cap per tile
+const TREE_SPACING = 7.3, TREE_MAX = PROFILE.treeMax; // metres between grid cells (woods 1.5x the old 9 m grid); cap per tile
 const hexKey = (h) => parseInt(h.slice(1), 16);
 const TREE_DENSITY = { // painted ground colour -> chance of a tree per grid cell
-  [hexKey(STYLE.landuse.wood)]: 0.9, [hexKey(STYLE.landuse.nature_reserve)]: 0.7, [hexKey(STYLE.landuse.park)]: 0.18,
-  [hexKey(STYLE.landuse.scrub)]: 0.15, [hexKey(STYLE.landuse.cemetery)]: 0.1,
+  [hexKey(STYLE.landuse.wood)]: 0.9, [hexKey(STYLE.landuse.nature_reserve)]: 0.7, // denser grid -> 1.5x trees
+  [hexKey(STYLE.landuse.park)]: 0.12, [hexKey(STYLE.landuse.scrub)]: 0.1, [hexKey(STYLE.landuse.cemetery)]: 0.067, // unchanged per m²
 };
 
 const G = 65; // ground patch verts per side (~12 m apart)
-const GROUND_PX = 2048; // ~0.4 m per pixel. ponytail: ~22 MB of GPU per tile; paint far tiles smaller if memory bites
+const GROUND_PX = PROFILE.groundPx; // 2048: ~0.4 m per pixel, ~22 MB of GPU per tile; 1024 on phones
 const tiles = new Map(); // "x/y" -> Promise<tile|null>
 const ready = new Map(); // "x/y" -> {foots, water, bridges}, for synchronous collision
 
@@ -226,7 +243,7 @@ async function loadTile(x, y) {
   paintTile(cv.getContext("2d"), vt, GROUND_PX, tileMPerPx(BUILD_Z, geo.tileYToLat(y + 0.5, BUILD_Z), GROUND_PX), { roads: false });
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  objects.push(new THREE.Mesh(gg, toon({ map: tex })));
+  objects.push(Object.assign(new THREE.Mesh(gg, toon({ map: tex })), { receiveShadow: true }));
   // where trees may grow: a small paint of the same tile *with* roads, so trees keep off roads and paths
   const mask = new OffscreenCanvas(MASK_PX, MASK_PX).getContext("2d", { willReadFrequently: true });
   paintTile(mask, vt, MASK_PX, tileMPerPx(BUILD_Z, geo.tileYToLat(y + 0.5, BUILD_Z), MASK_PX));
@@ -261,7 +278,7 @@ async function loadTile(x, y) {
     g.setAttribute("position", new THREE.Float32BufferAttribute(L.pos, 3));
     g.setAttribute("color", new THREE.Float32BufferAttribute(L.col, 3));
     g.setIndex(L.idx); g.computeVertexNormals();
-    objects.push(new THREE.Mesh(g, roadMats[name] ??= toon({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: off, polygonOffsetUnits: off })));
+    objects.push(Object.assign(new THREE.Mesh(g, roadMats[name] ??= toon({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: off, polygonOffsetUnits: off })), { receiveShadow: true }));
   }
 
   // buildings
@@ -302,7 +319,7 @@ async function loadTile(x, y) {
   if (geoms.length) {
     const merged = mergeGeometries(geoms);
     geoms.forEach((g) => g.dispose());
-    objects.push(new THREE.Mesh(merged, buildingMat), new THREE.LineSegments(new THREE.EdgesGeometry(merged, 25), inkMat));
+    objects.push(Object.assign(new THREE.Mesh(merged, buildingMat), { castShadow: true, receiveShadow: true }), new THREE.LineSegments(new THREE.EdgesGeometry(merged, 25), inkMat));
   }
 
   // bridges: decks between their ends' ground, never below ground + 0.6 m
@@ -329,11 +346,11 @@ async function loadTile(x, y) {
       }
     }
   }
-  if (decks.length) { objects.push(new THREE.Mesh(mergeGeometries(decks), bridgeMat)); decks.forEach((g) => g.dispose()); }
+  if (decks.length) { objects.push(Object.assign(new THREE.Mesh(mergeGeometries(decks), bridgeMat), { castShadow: true, receiveShadow: true })); decks.forEach((g) => g.dispose()); }
 
   // trees: a jittered grid, kept only where the painted ground is wood or park (so never on roads or water)
   const mpp = tileMPerPx(BUILD_Z, geo.tileYToLat(y + 0.5, BUILD_Z), MASK_PX), stepPx = TREE_SPACING / mpp, m = new THREE.Matrix4();
-  const spots = [];
+  const spots = [], treeCells = new Map(); // "cx,cz" (8 m cells) -> [[x, z, trunk radius]]
   for (let j = 0; j * stepPx < MASK_PX && spots.length < TREE_MAX; j++) for (let i = 0; i * stepPx < MASK_PX; i++) {
     const h = ((i * 73856093) ^ (j * 19349663) ^ (x * 83492791) ^ y) >>> 0, r = (s) => ((h >>> s) & 255) / 255;
     const px = Math.min(MASK_PX - 1, (i + r(0)) * stepPx) | 0, py = Math.min(MASK_PX - 1, (j + r(8)) * stepPx) | 0, o = (py * MASK_PX + px) * 4;
@@ -341,7 +358,11 @@ async function loadTile(x, y) {
     if (!density || r(16) > density) continue;
     const [lx, lz] = fromTile((px / MASK_PX) * E, (py / MASK_PX) * E), gy = groundAt(lx, lz);
     if (!Number.isFinite(gy) || foots.some((f) => within(lx, lz, f, 2) && geo.pointInRing(lx, lz, f.ring))) continue;
-    spots.push([lx, gy - base, lz, 0.75 + r(24) * 0.9, r(4) * 6.28, r(12)]);
+    const s = 0.75 + r(24) * 0.9;
+    spots.push([lx, gy - base, lz, s, r(4) * 6.28, r(12)]);
+    const cell = `${Math.floor(lx / 8)},${Math.floor(lz / 8)}`;
+    if (!treeCells.has(cell)) treeCells.set(cell, []);
+    treeCells.get(cell).push([lx, lz, 0.45 * s]); // ponytail: trunk + a little; the boughs stay walk-through
   }
   if (spots.length) {
     const trees = new THREE.InstancedMesh(TREE, treeMat, spots.length), tc = new THREE.Color();
@@ -349,11 +370,12 @@ async function loadTile(x, y) {
       trees.setMatrixAt(k, m.makeRotationY(rot).scale(new THREE.Vector3(s, s, s)).setPosition(tx, ty, tz));
       trees.setColorAt(k, tc.setHSL(0, 0, 0.8 + shade * 0.35)); // multiplies the vertex colours: lighter/darker pines
     });
+    trees.castShadow = trees.receiveShadow = true;
     objects.push(trees);
   }
 
   objects.forEach((o) => scene.add(o));
-  return { objects, foots, water, bridges };
+  return { objects, foots, water, bridges, treeCells };
 }
 
 // ---- collision ---------------------------------------------------------------------------------------------------
@@ -364,6 +386,13 @@ function inBuilding(x, z) {
 }
 function inWater(x, z) {
   for (const t of ready.values()) for (const w of t.water) if (within(x, z, w) && inPolygon(x, z, w.rings)) return true;
+  return false;
+}
+function inTree(x, z) {
+  const cx = Math.floor(x / 8), cz = Math.floor(z / 8);
+  for (const t of ready.values())
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++)
+      for (const [tx, tz, r] of t.treeCells.get(`${cx + i},${cz + j}`) ?? []) if (Math.hypot(x - tx, z - tz) < r + RADIUS) return true;
   return false;
 }
 // deck height under a point, if one is within 1.5 m of height y (so you can walk under a bridge too)
@@ -410,6 +439,25 @@ addEventListener("keydown", (e) => keys.add(e.key.toLowerCase()));
 addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
 addEventListener("blur", () => keys.clear());
 const held = (...k) => k.some((x) => keys.has(x));
+// touch: a virtual stick (x turns, y walks; pushed to the rim runs)
+const stick = { x: 0, y: 0 };
+const stickEl = document.getElementById("stick"), knob = stickEl.firstElementChild;
+const moveStick = (e) => {
+  const r = stickEl.getBoundingClientRect(), R = r.width / 2;
+  let dx = (e.clientX - r.left - R) / R, dy = (e.clientY - r.top - R) / R;
+  const l = Math.hypot(dx, dy); if (l > 1) { dx /= l; dy /= l; }
+  Object.assign(stick, { x: dx, y: dy });
+  knob.style.transform = `translate(${dx * R * 0.6}px, ${dy * R * 0.6}px)`;
+};
+let stickId = null; // the finger on the stick; others (e.g. tapping M) are ignored
+stickEl.addEventListener("pointerdown", (e) => {
+  stickId = e.pointerId; moveStick(e);
+  try { stickEl.setPointerCapture(e.pointerId); } catch {} // keeps the stick when the finger slides off it
+});
+stickEl.addEventListener("pointermove", (e) => { if (e.pointerId === stickId) moveStick(e); });
+const releaseStick = (e) => { if (e.pointerId !== stickId) return; stickId = null; Object.assign(stick, { x: 0, y: 0 }); knob.style.transform = ""; };
+stickEl.addEventListener("pointerup", releaseStick);
+stickEl.addEventListener("pointercancel", releaseStick);
 const RADIUS = 0.4;
 
 // The start (or a jump) is often inside a building or in a lake: once its tile is in, spiral out to free ground.
@@ -418,7 +466,7 @@ function place() {
   const [lon, lat] = frame.toLonLat(walker.x, walker.z);
   if (!ready.has(`${Math.floor(geo.lonToTileX(lon, BUILD_Z))}/${Math.floor(geo.latToTileY(lat, BUILD_Z))}`)) return;
   placed = true;
-  const solid = (x, z) => inBuilding(x, z) || inWater(x, z);
+  const solid = (x, z) => inBuilding(x, z) || inWater(x, z) || inTree(x, z);
   for (let r = 0; r < 300; r += 1.5)
     for (let a = 0; a < 2 * Math.PI; a += Math.PI / 8) {
       const x = walker.x + r * Math.cos(a), z = walker.z + r * Math.sin(a);
@@ -435,14 +483,17 @@ function standAt(x, z) {
   const deck = deckAt(x, z, walker.y);
   if (Number.isFinite(deck)) return deck;
   const px = x + Math.sign(x - walker.x) * RADIUS, pz = z + Math.sign(z - walker.z) * RADIUS;
-  if (inBuilding(px, pz) || inWater(px, pz)) return NaN;
+  if (inBuilding(px, pz) || inWater(px, pz) || inTree(x, z)) return NaN;
   return g;
 }
 
 function step(dt) {
   if (!placed) return place();
-  walker.yaw += ((held("a", "arrowleft") ? 1 : 0) - (held("d", "arrowright") ? 1 : 0)) * 2.2 * dt;
-  const v = ((held("w", "arrowup") ? 1 : 0) - (held("s", "arrowdown") ? 1 : 0)) * (held("shift") ? 15 : 4.5) * dt;
+  const turn = (held("a", "arrowleft") ? 1 : 0) - (held("d", "arrowright") ? 1 : 0) - stick.x;
+  const fwd = (held("w", "arrowup") ? 1 : 0) - (held("s", "arrowdown") ? 1 : 0) - stick.y;
+  const run = held("shift") || Math.hypot(stick.x, stick.y) > 0.92;
+  walker.yaw += Math.max(-1, Math.min(1, turn)) * 2.2 * dt;
+  const v = Math.max(-1, Math.min(1, fwd)) * (run ? 15 : 4.5) * dt;
   const dx = -Math.sin(walker.yaw) * v, dz = -Math.cos(walker.yaw) * v;
   let y = standAt(walker.x + dx, walker.z); // per axis, so walls slide
   if (Number.isFinite(y)) { walker.x += dx; walker.y = y; }
@@ -474,16 +525,19 @@ renderer.setAnimationLoop((now) => {
   player.rotation.y = walker.yaw;
   const cx = walker.x + Math.sin(walker.yaw) * 9, cz = walker.z + Math.cos(walker.yaw) * 9, cg = groundAt(cx, cz);
   camGoal.set(cx, Math.max(py + 4, Number.isFinite(cg) ? cg - base + 1.5 : py + 4), cz);
-  // keep a wall from coming between camera and walker: pull the camera in to the first building hit
+  // keep a wall or a tree from coming between camera and walker: pull the camera in to the first hit
   look.set(walker.x, py + 1.4, walker.z);
   ray.set(look, camGoal.clone().sub(look).normalize());
   ray.far = camGoal.distanceTo(look);
-  const hit = ray.intersectObjects(scene.children.filter((m) => m.material === buildingMat), false)[0];
+  const hit = ray.intersectObjects(scene.children.filter((m) => m.material === buildingMat || m.material === treeMat), false)[0]; // walls and trees
   if (hit) camGoal.copy(look).addScaledVector(ray.ray.direction, Math.max(0.5, hit.distance - 0.4));
   camPos.lerp(camGoal, camPos.lengthSq() && !hit ? 1 - Math.exp(-6 * dt) : 1);
   camera.position.copy(camPos);
   camera.lookAt(look);
   if (q.has("aerial")) { camera.position.set(walker.x, py + +q.get("aerial"), walker.z + +q.get("aerial") * 0.6); camera.lookAt(look); } // debug
+  // shadow box follows the walker, snapped to whole metres so shadow edges don't crawl
+  sun.target.position.set(Math.round(walker.x), Math.round(py), Math.round(walker.z));
+  sun.position.copy(sun.target.position).addScaledVector(SUN_DIR, 700);
   renderer.render(scene, camera);
   maps.draw();
   const [lon, lat] = frame.toLonLat(walker.x, walker.z);

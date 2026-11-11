@@ -55,4 +55,12 @@ Each step is a commit you can check out.
     street level; the ground texture keeps land use and water.
   - Instanced pines on a jittered grid, kept where a small road-aware paint of the tile says wood or park.
   ![](docs/step4-aerial.png) ![](docs/step4-trees.png) ![](docs/step4-street.png)
-- [ ] **5. Any town.** Place search, re-origin when far from start, terrain seams, loading by view direction.
+- [x] **5. Shadows, phones, solid trees.**
+  - Hard-edged sun shadows (cel look) in a box that follows the walker; faces turned from the sun use the same
+    tone as cast shadows.
+  - Phones/tablets (`pointer: coarse`, or `?mobile`): a virtual stick (push to the rim to run), pinch-zoom and
+    double-tap on the full map, smaller panels, and a lighter profile (pixel ratio 1.5, 1024 px ground, 1024 shadow
+    map, 450 m of tiles, fewer trees).
+  - Trees block walking (trunks; the boughs stay walk-through) and pull the camera in; woods 1.5x denser.
+  ![](docs/step5-shadows.png) ![](docs/step5-mobile.png)
+- [ ] **6. Any town.** Place search, re-origin when far from start, terrain seams, loading by view direction.
